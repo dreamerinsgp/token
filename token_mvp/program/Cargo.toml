@@ -1,0 +1,37 @@
+[package]
+name = "spl-token"
+version = "0.1.0"
+description = "Solana Program Library Token"
+authors = { workspace = true }
+repository = { workspace = true }
+license = { workspace = true }
+edition = { workspace = true }
+
+[features]
+no-entrypoint = []
+
+[dependencies]
+arrayref = "0.3.9"
+solana-program-error = { workspace = true }
+solana-program-pack = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-program-entrypoint = { workspace = true }
+solana-instruction = { workspace = true }
+solana-account-info = "3.0.0"
+solana-program-memory = "3.0.0"
+solana-rent = "3.0.0"
+solana-sysvar = { version = "3.0.0", features = ["bincode"] }
+solana-msg = "3.0.0"
+solana-cpi = "3.0.0"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+mollusk-svm = "0.9.0"
+solana-account = "3.0.0"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+
+[package.metadata.solana]
+program-id = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
