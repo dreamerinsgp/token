@@ -38,6 +38,10 @@ pub enum TokenError {
     /// Not rent exempt
     #[error("Not rent exempt")]
     NotRentExempt,
+    
+    /// Invalid instruction
+    #[error("Invalid instruction")]
+    InvalidInstruction,
 }
 
 impl From<TokenError> for ProgramError {
