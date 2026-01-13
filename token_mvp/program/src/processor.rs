@@ -2,7 +2,7 @@ use {
     crate::{
         check_program_account,
         error::TokenError,
-        instruction::TokenInstruction,
+        instruction::{AuthorityType, TokenInstruction},
         native_mint,
         state::{Account, Mint},
     },
@@ -210,15 +210,30 @@ impl Processor {
         program_id: &Pubkey,
         accounts: &[AccountInfo],
         amount: u64,
+        expected_decimals: Option<u8>,
     ) -> ProgramResult {
         let _program_id = program_id; // Suppress unused warning for now
         let account_info_iter = &mut accounts.iter();
         
         // Extract accounts in order:
-        // 0. [writable] The source account
-        // 1. [writable] The destination account
-        // 2. [signer] The source account's owner/delegate
+        // For Transfer:
+        //   0. [writable] The source account
+        //   1. [writable] The destination account
+        //   2. [signer] The source account's owner/delegate
+        // For TransferChecked:
+        //   0. [writable] The source account
+        //   1. [] The token mint
+        //   2. [writable] The destination account
+        //   3. [signer] The source account's owner/delegate
         let source_info = next_account_info(account_info_iter)?;
+        
+        // If expected_decimals is Some, this is TransferChecked and we need to extract mint
+        let mint_info = if expected_decimals.is_some() {
+            Some(next_account_info(account_info_iter)?)
+        } else {
+            None
+        };
+        
         let destination_info = next_account_info(account_info_iter)?;
         let authority_info = next_account_info(account_info_iter)?;
         
@@ -263,6 +278,23 @@ impl Processor {
         // Validate mint match
         if source_account.mint != destination_account.mint {
             return Err(TokenError::MintMismatch.into());
+        }
+        
+        // If this is TransferChecked, validate mint and decimals
+        if let (Some(mint_info), Some(expected_decimals)) = (mint_info, expected_decimals) {
+            // Validate mint matches source account's mint
+            if source_account.mint != *mint_info.key {
+                return Err(TokenError::MintMismatch.into());
+            }
+            
+            // Validate mint is owned by this program
+            check_program_account(mint_info)?;
+            
+            // Unpack mint and validate decimals
+            let mint = Mint::unpack(&mint_info.data.borrow())?;
+            if expected_decimals != mint.decimals {
+                return Err(TokenError::MintDecimalsMismatch.into());
+            }
         }
         
         // Check for self-transfer (no-op)
@@ -1063,6 +1095,292 @@ impl Processor {
         Ok(())
     }
 
+    /// Processes a Revoke instruction
+    /// 
+    /// Revoke revokes the delegate's authority over the account by removing the delegate
+    /// and setting delegated_amount to 0. This effectively cancels any pending approvals.
+    /// 
+    /// Accounts:
+    /// - [writable] The source account
+    /// - [signer] The source account owner
+    pub fn process_revoke(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+    ) -> ProgramResult {
+        let _program_id = program_id; // Suppress unused warning for now
+        let account_info_iter = &mut accounts.iter();
+        
+        // Extract accounts in order:
+        // 0. [writable] The source account
+        // 1. [signer] The source account owner
+        let source_account_info = next_account_info(account_info_iter)?;
+        let owner_info = next_account_info(account_info_iter)?;
+        
+        // Validate account is owned by this program
+        check_program_account(source_account_info)?;
+        
+        // Validate account is writable
+        if !source_account_info.is_writable {
+            return Err(TokenError::InvalidOwner.into());
+        }
+        
+        // Unpack source account
+        let mut source_account = Account::unpack(&source_account_info.data.borrow())?;
+        
+        // Validate account is initialized
+        if !source_account.is_initialized {
+            return Err(TokenError::NotInitialized.into());
+        }
+        
+        // Check if account is frozen
+        if source_account.is_frozen {
+            return Err(TokenError::AccountFrozen.into());
+        }
+        
+        // Validate owner is the account owner
+        if source_account.owner != *owner_info.key {
+            return Err(TokenError::InvalidOwner.into());
+        }
+        
+        // Validate owner is a signer
+        if !owner_info.is_signer {
+            return Err(TokenError::InvalidOwner.into());
+        }
+        
+        // Revoke delegate: clear delegate and set delegated_amount to 0
+        let delegate_before = source_account.delegate;
+        let delegated_amount_before = source_account.delegated_amount;
+        let had_delegate = delegate_before.is_some();
+        
+        source_account.delegate = COption::None;
+        source_account.delegated_amount = 0;
+        
+        // Log debug information
+        msg!("=== Revoke Debug Info ===");
+        msg!("[source_account_info] Account Information:");
+        msg!("  - key: {}", source_account_info.key);
+        msg!("  - owner: {}", source_account.owner);
+        msg!("  - mint: {}", source_account.mint);
+        msg!("  - amount: {}", source_account.amount);
+        
+        if had_delegate {
+            msg!("  - delegate before: {:?} (will be cleared)", delegate_before);
+            msg!("  - delegated_amount before: {} (will be set to 0)", delegated_amount_before);
+        } else {
+            msg!("  - delegate before: None (no delegate to revoke)");
+            msg!("  - delegated_amount before: {} (will be set to 0)", delegated_amount_before);
+        }
+        
+        msg!("[owner_info] Account Owner:");
+        msg!("  - key: {} (must be account owner)", owner_info.key);
+        msg!("  - is_signer: {}", owner_info.is_signer);
+        
+        msg!("[revoke] Revocation Details:");
+        msg!("  - delegate after: None");
+        msg!("  - delegated_amount after: 0");
+        
+        // Pack and save account data
+        Account::pack(source_account, &mut source_account_info.data.borrow_mut())?;
+        
+        msg!("✅ Revoke completed successfully");
+        msg!("========================================");
+        
+        Ok(())
+    }
+
+    /// Processes a SetAuthority instruction
+    /// 
+    /// SetAuthority sets a new authority for a mint or account. It can be used to:
+    /// - Update mint authority or freeze authority for mints
+    /// - Update account owner for accounts
+    /// - Disable authorities by setting to None (once disabled, cannot be re-enabled)
+    /// 
+    /// Accounts:
+    /// - [writable] The mint or account to change the authority of
+    /// - [signer] The current authority
+    pub fn process_set_authority(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        authority_type: AuthorityType,
+        new_authority: COption<Pubkey>,
+    ) -> ProgramResult {
+        let account_info_iter = &mut accounts.iter();
+        
+        // Extract accounts in order:
+        // 0. [writable] The mint or account to change the authority of
+        // 1. [signer] The current authority
+        let account_info = next_account_info(account_info_iter)?;
+        let authority_info = next_account_info(account_info_iter)?;
+        
+        // Validate account is owned by this program
+        check_program_account(account_info)?;
+        
+        // Validate account is writable
+        if !account_info.is_writable {
+            return Err(TokenError::InvalidOwner.into());
+        }
+        
+        // Determine if this is an Account or Mint based on data length
+        let account_data_len = account_info.data_len();
+        
+        if account_data_len == Account::LEN {
+            // This is an Account
+            let mut account = Account::unpack(&account_info.data.borrow())?;
+            
+            // Check if account is frozen
+            if account.is_frozen {
+                return Err(TokenError::AccountFrozen.into());
+            }
+            
+            match authority_type {
+                AuthorityType::AccountOwner => {
+                    // Validate current owner
+                    if account.owner != *authority_info.key {
+                        return Err(TokenError::InvalidOwner.into());
+                    }
+                    
+                    // Validate authority is a signer
+                    if !authority_info.is_signer {
+                        return Err(TokenError::InvalidOwner.into());
+                    }
+                    
+                    // Save old owner for logging
+                    let old_owner = account.owner;
+                    
+                    // Set new owner (must be Some, cannot be None)
+                    if let COption::Some(new_owner) = new_authority {
+                        account.owner = new_owner;
+                        
+                        // Clear delegate when changing owner
+                        account.delegate = COption::None;
+                        account.delegated_amount = 0;
+                        
+                        // Log debug information
+                        msg!("=== SetAuthority Debug Info ===");
+                        msg!("[account_info] Account:");
+                        msg!("  - key: {}", account_info.key);
+                        msg!("  - owner before: {}", old_owner);
+                        msg!("  - owner after: {}", account.owner);
+                        msg!("  - delegate cleared: true");
+                        msg!("  - delegated_amount cleared: true");
+                        
+                        msg!("[authority_info] Current Owner:");
+                        msg!("  - key: {} (must be account owner)", authority_info.key);
+                        msg!("  - is_signer: {}", authority_info.is_signer);
+                        
+                        msg!("[set_authority] Authority Change:");
+                        msg!("  - authority_type: AccountOwner");
+                        msg!("  - new_authority: {:?}", new_authority);
+                        
+                        Account::pack(account, &mut account_info.data.borrow_mut())?;
+                        
+                        msg!("✅ SetAuthority completed successfully");
+                        msg!("========================================");
+                    } else {
+                        return Err(TokenError::InvalidInstruction.into());
+                    }
+                }
+                AuthorityType::CloseAccount => {
+                    // Note: In our MVP, we don't have close_authority field
+                    // So we return an error for this authority type
+                    return Err(TokenError::AuthorityTypeNotSupported.into());
+                }
+                _ => {
+                    // Mint authority types not supported for accounts
+                    return Err(TokenError::AuthorityTypeNotSupported.into());
+                }
+            }
+        } else if account_data_len == Mint::LEN {
+            // This is a Mint
+            let mut mint = Mint::unpack(&account_info.data.borrow())?;
+            
+            match authority_type {
+                AuthorityType::MintTokens => {
+                    // Validate mint has mint_authority (cannot change if already disabled)
+                    let mint_authority = mint.mint_authority.ok_or(TokenError::FixedSupply)?;
+                    
+                    // Validate current mint authority
+                    if mint_authority != *authority_info.key {
+                        return Err(TokenError::InvalidOwner.into());
+                    }
+                    
+                    // Validate authority is a signer
+                    if !authority_info.is_signer {
+                        return Err(TokenError::InvalidOwner.into());
+                    }
+                    
+                    // Set new mint authority
+                    mint.mint_authority = new_authority;
+                    
+                    // Log debug information
+                    msg!("=== SetAuthority Debug Info ===");
+                    msg!("[mint_info] Mint:");
+                    msg!("  - key: {}", account_info.key);
+                    msg!("  - mint_authority before: {:?}", COption::Some(mint_authority));
+                    msg!("  - mint_authority after: {:?}", mint.mint_authority);
+                    
+                    msg!("[authority_info] Current Mint Authority:");
+                    msg!("  - key: {} (must be mint authority)", authority_info.key);
+                    msg!("  - is_signer: {}", authority_info.is_signer);
+                    
+                    msg!("[set_authority] Authority Change:");
+                    msg!("  - authority_type: MintTokens");
+                    msg!("  - new_authority: {:?}", new_authority);
+                    
+                    Mint::pack(mint, &mut account_info.data.borrow_mut())?;
+                    
+                    msg!("✅ SetAuthority completed successfully");
+                    msg!("========================================");
+                }
+                AuthorityType::FreezeAccount => {
+                    // Validate mint has freeze_authority (cannot change if already disabled)
+                    let freeze_authority = mint.freeze_authority.ok_or(TokenError::MintCannotFreeze)?;
+                    
+                    // Validate current freeze authority
+                    if freeze_authority != *authority_info.key {
+                        return Err(TokenError::InvalidOwner.into());
+                    }
+                    
+                    // Validate authority is a signer
+                    if !authority_info.is_signer {
+                        return Err(TokenError::InvalidOwner.into());
+                    }
+                    
+                    // Set new freeze authority
+                    mint.freeze_authority = new_authority;
+                    
+                    // Log debug information
+                    msg!("=== SetAuthority Debug Info ===");
+                    msg!("[mint_info] Mint:");
+                    msg!("  - key: {}", account_info.key);
+                    msg!("  - freeze_authority before: {:?}", COption::Some(freeze_authority));
+                    msg!("  - freeze_authority after: {:?}", mint.freeze_authority);
+                    
+                    msg!("[authority_info] Current Freeze Authority:");
+                    msg!("  - key: {} (must be freeze authority)", authority_info.key);
+                    msg!("  - is_signer: {}", authority_info.is_signer);
+                    
+                    msg!("[set_authority] Authority Change:");
+                    msg!("  - authority_type: FreezeAccount");
+                    msg!("  - new_authority: {:?}", new_authority);
+                    
+                    Mint::pack(mint, &mut account_info.data.borrow_mut())?;
+                    
+                    msg!("✅ SetAuthority completed successfully");
+                    msg!("========================================");
+                }
+                _ => {
+                    // Account authority types not supported for mints
+                    return Err(TokenError::AuthorityTypeNotSupported.into());
+                }
+            }
+        } else {
+            return Err(solana_program_error::ProgramError::InvalidAccountData);
+        }
+        
+        Ok(())
+    }
+
     /// Main instruction processing router
     pub fn process(
         program_id: &Pubkey,
@@ -1089,7 +1407,10 @@ impl Processor {
                 Self::process_initialize_account(program_id, accounts)
             }
             TokenInstruction::Transfer { amount } => {
-                Self::process_transfer(program_id, accounts, amount)
+                Self::process_transfer(program_id, accounts, amount, None)
+            }
+            TokenInstruction::TransferChecked { amount, decimals } => {
+                Self::process_transfer(program_id, accounts, amount, Some(decimals))
             }
             TokenInstruction::MintTo { amount } => {
                 Self::process_mint_to(program_id, accounts, amount)
@@ -1111,6 +1432,15 @@ impl Processor {
             }
             TokenInstruction::ThawAccount => {
                 Self::process_thaw_account(program_id, accounts)
+            }
+            TokenInstruction::Revoke => {
+                Self::process_revoke(program_id, accounts)
+            }
+            TokenInstruction::SetAuthority {
+                authority_type,
+                new_authority,
+            } => {
+                Self::process_set_authority(program_id, accounts, authority_type, new_authority)
             }
         }
     }

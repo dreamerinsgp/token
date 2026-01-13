@@ -58,6 +58,18 @@ pub enum TokenError {
     /// Mint cannot freeze accounts
     #[error("Mint cannot freeze accounts")]
     MintCannotFreeze,
+    
+    /// Authority type not supported
+    #[error("Authority type not supported")]
+    AuthorityTypeNotSupported,
+    
+    /// Fixed supply - mint authority cannot be changed
+    #[error("Fixed supply")]
+    FixedSupply,
+    
+    /// Mint decimals mismatch
+    #[error("Mint decimals mismatch")]
+    MintDecimalsMismatch,
 }
 
 impl From<TokenError> for ProgramError {

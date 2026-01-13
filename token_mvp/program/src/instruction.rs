@@ -6,6 +6,32 @@ use {
     solana_pubkey::{Pubkey, PUBKEY_BYTES},
 };
 
+/// Authority types for SetAuthority instruction
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorityType {
+    /// Mint authority (for mints)
+    MintTokens = 0,
+    /// Freeze authority (for mints)
+    FreezeAccount = 1,
+    /// Account owner (for accounts)
+    AccountOwner = 2,
+    /// Close authority (for accounts)
+    CloseAccount = 3,
+}
+
+impl AuthorityType {
+    /// Try to create AuthorityType from u8
+    pub fn from_u8(value: u8) -> Result<Self, ProgramError> {
+        match value {
+            0 => Ok(AuthorityType::MintTokens),
+            1 => Ok(AuthorityType::FreezeAccount),
+            2 => Ok(AuthorityType::AccountOwner),
+            3 => Ok(AuthorityType::CloseAccount),
+            _ => Err(TokenError::InvalidInstruction.into()),
+        }
+    }
+}
+
 /// Instructions supported by the token program.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenInstruction {
@@ -24,6 +50,13 @@ pub enum TokenInstruction {
     Transfer {
         /// Amount of tokens to transfer
         amount: u64,
+    },
+    /// Transfer tokens with explicit mint and decimals validation
+    TransferChecked {
+        /// Amount of tokens to transfer
+        amount: u64,
+        /// Expected number of base 10 digits to the right of the decimal place
+        decimals: u8,
     },
     /// Mint new tokens to an account
     MintTo {
@@ -48,6 +81,15 @@ pub enum TokenInstruction {
     FreezeAccount,
     /// Thaw a frozen account using the mint's freeze authority
     ThawAccount,
+    /// Revoke the delegate's authority over the account
+    Revoke,
+    /// Set a new authority for a mint or account
+    SetAuthority {
+        /// The type of authority to update
+        authority_type: AuthorityType,
+        /// The new authority (None to disable)
+        new_authority: COption<Pubkey>,
+    },
 }
 
 
@@ -86,6 +128,16 @@ impl TokenInstruction {
                     .ok_or(TokenError::InvalidInstruction)?;
                 Self::Transfer { amount }
             }
+            12 => {
+                // TransferChecked instruction
+                let amount = rest
+                    .get(..8)
+                    .and_then(|slice| slice.try_into().ok())
+                    .map(u64::from_le_bytes)
+                    .ok_or(TokenError::InvalidInstruction)?;
+                let (&decimals, _rest) = rest[8..].split_first().ok_or(TokenError::InvalidInstruction)?;
+                Self::TransferChecked { amount, decimals }
+            }
             7 => {
                 // MintTo instruction
                 let amount = rest
@@ -108,6 +160,17 @@ impl TokenInstruction {
             10 => Self::CloseAccount,
             11 => Self::FreezeAccount,
             12 => Self::ThawAccount,
+            5 => Self::Revoke, // Tag for Revoke
+            6 => {
+                // SetAuthority instruction
+                let (&authority_type_byte, rest) = rest.split_first().ok_or(TokenError::InvalidInstruction)?;
+                let authority_type = AuthorityType::from_u8(authority_type_byte)?;
+                let (new_authority, _rest) = Self::unpack_pubkey_option(rest)?;
+                Self::SetAuthority {
+                    authority_type,
+                    new_authority,
+                }
+            }
             _ => return Err(TokenError::InvalidInstruction.into()),
         })
     }

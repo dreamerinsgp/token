@@ -356,7 +356,7 @@ fn test_transfer() {
     ];
     
     // 执行 Transfer
-    Processor::process_transfer(&program_id, &accounts, transfer_amount).unwrap();
+    Processor::process_transfer(&program_id, &accounts, transfer_amount, None).unwrap();
     
     // ========== 第六部分：验证转账结果 ==========
     
@@ -528,7 +528,7 @@ fn test_transfer_insufficient_funds() {
     ];
     
     // 尝试转账应该失败
-    let result = Processor::process_transfer(&program_id, &accounts, transfer_amount);
+    let result = Processor::process_transfer(&program_id, &accounts, transfer_amount, None);
     assert!(result.is_err(), "余额不足的转账应该失败");
     
     if let Err(err) = result {
@@ -1480,7 +1480,7 @@ fn test_transfer_with_delegate() {
         delegate_account_info2,
     ];
     
-    Processor::process_transfer(&program_id, &transfer_accounts, transfer_amount).unwrap();
+    Processor::process_transfer(&program_id, &transfer_accounts, transfer_amount, None).unwrap();
     
     // 验证转账结果
     let source_account_after = Account::unpack(&source_account_info.data.borrow()).unwrap();
@@ -2245,7 +2245,7 @@ fn test_transfer_frozen_account_should_fail() {
         source_owner_account_info2,
     ];
     
-    let result = Processor::process_transfer(&program_id, &transfer_accounts, transfer_amount);
+    let result = Processor::process_transfer(&program_id, &transfer_accounts, transfer_amount, None);
     assert!(
         result.is_err(),
         "冻结账户不能转账"
@@ -2690,4 +2690,1077 @@ fn test_freeze_thaw_cycle() {
     assert_eq!(account3.is_frozen, true);
     
     println!("✅ 测试通过：冻结-解冻循环测试成功");
+}
+
+#[test]
+fn test_revoke() {
+    // ========== 测试撤销委托 ==========
+    
+    let program_id = id();
+    let mint_keypair = Pubkey::new_unique();
+    let mint_authority = Pubkey::new_unique();
+    let decimals = 6u8;
+    
+    let account_keypair = Pubkey::new_unique();
+    let account_owner = Pubkey::new_unique();
+    let delegate = Pubkey::new_unique();
+    
+    let rent = Rent::default();
+    let mint_data_len = Mint::LEN;
+    let account_data_len = Account::LEN;
+    let mint_rent_exempt = rent.minimum_balance(mint_data_len);
+    let account_rent_exempt = rent.minimum_balance(account_data_len);
+    
+    // 创建并初始化 mint
+    let mut mint_data = vec![0u8; mint_data_len];
+    let mut mint_lamports = mint_rent_exempt;
+    
+    let mint_account_info = AccountInfo::new(
+        &mint_keypair,
+        false,
+        true,
+        &mut mint_lamports,
+        &mut mint_data,
+        &program_id,
+        false,
+    );
+    
+    let rent_sysvar_id = Pubkey::from_str("SysvarRent111111111111111111111111111111111").unwrap();
+    let rent_data = bincode::serialize(&rent).unwrap();
+    let mut rent_lamports = 0u64;
+    let mut rent_data_mut = rent_data.clone();
+    
+    let rent_sysvar_info = AccountInfo::new(
+        &rent_sysvar_id,
+        false,
+        false,
+        &mut rent_lamports,
+        &mut rent_data_mut,
+        &rent_sysvar_id,
+        false,
+    );
+    
+    Processor::process_initialize_mint(
+        &program_id,
+        &[mint_account_info.clone(), rent_sysvar_info.clone()],
+        decimals,
+        mint_authority,
+        COption::None,
+    ).unwrap();
+    
+    // 初始化账户
+    let mut account_data = vec![0u8; account_data_len];
+    let mut account_lamports = account_rent_exempt;
+    
+    let account_info = AccountInfo::new(
+        &account_keypair,
+        false,
+        true,
+        &mut account_lamports,
+        &mut account_data,
+        &program_id,
+        false,
+    );
+    
+    let mut account_owner_lamports = 0u64;
+    let mut account_owner_data = vec![];
+    let account_owner_account_id = Pubkey::default();
+    let account_owner_account_info = AccountInfo::new(
+        &account_owner,
+        false,
+        false,
+        &mut account_owner_lamports,
+        &mut account_owner_data,
+        &account_owner_account_id,
+        false,
+    );
+    
+    Processor::process_initialize_account(
+        &program_id,
+        &[
+            account_info.clone(),
+            mint_account_info.clone(),
+            account_owner_account_info,
+            rent_sysvar_info.clone(),
+        ],
+    ).unwrap();
+    
+    // 先批准委托
+    let approve_amount = 500u64;
+    
+    let mut owner_lamports = 0u64;
+    let mut owner_data = vec![];
+    let owner_account_id = Pubkey::default();
+    let owner_account_info = AccountInfo::new(
+        &account_owner,
+        true,
+        false,
+        &mut owner_lamports,
+        &mut owner_data,
+        &owner_account_id,
+        false,
+    );
+    
+    let mut delegate_lamports = 0u64;
+    let mut delegate_data = vec![];
+    let delegate_account_id = Pubkey::default();
+    let delegate_account_info = AccountInfo::new(
+        &delegate,
+        false,
+        false,
+        &mut delegate_lamports,
+        &mut delegate_data,
+        &delegate_account_id,
+        false,
+    );
+    
+    let approve_accounts = vec![
+        account_info.clone(),
+        delegate_account_info,
+        owner_account_info,
+    ];
+    
+    Processor::process_approve(&program_id, &approve_accounts, approve_amount).unwrap();
+    
+    // 验证委托已设置
+    let account_before = Account::unpack(&account_info.data.borrow()).unwrap();
+    assert_eq!(account_before.delegate, COption::Some(delegate), "委托应该已设置");
+    assert_eq!(account_before.delegated_amount, approve_amount, "委托金额应该已设置");
+    
+    // 撤销委托
+    let mut revoke_owner_lamports = 0u64;
+    let mut revoke_owner_data = vec![];
+    let revoke_owner_account_id = Pubkey::default();
+    let revoke_owner_account_info = AccountInfo::new(
+        &account_owner,
+        true,
+        false,
+        &mut revoke_owner_lamports,
+        &mut revoke_owner_data,
+        &revoke_owner_account_id,
+        false,
+    );
+    
+    let revoke_accounts = vec![
+        account_info.clone(),
+        revoke_owner_account_info,
+    ];
+    
+    Processor::process_revoke(&program_id, &revoke_accounts).unwrap();
+    
+    // 验证委托已被撤销
+    let account_after = Account::unpack(&account_info.data.borrow()).unwrap();
+    assert_eq!(account_after.delegate, COption::None, "委托应该已被清除");
+    assert_eq!(account_after.delegated_amount, 0, "委托金额应该已被设置为 0");
+    
+    println!("✅ 测试通过：Revoke 指令测试成功");
+}
+
+#[test]
+fn test_revoke_frozen_account_should_fail() {
+    // ========== 测试冻结账户不能撤销委托 ==========
+    
+    let program_id = id();
+    let mint_keypair = Pubkey::new_unique();
+    let mint_authority = Pubkey::new_unique();
+    let freeze_authority = Pubkey::new_unique();
+    let decimals = 6u8;
+    
+    let account_keypair = Pubkey::new_unique();
+    let account_owner = Pubkey::new_unique();
+    let delegate = Pubkey::new_unique();
+    
+    let rent = Rent::default();
+    let mint_data_len = Mint::LEN;
+    let account_data_len = Account::LEN;
+    let mint_rent_exempt = rent.minimum_balance(mint_data_len);
+    let account_rent_exempt = rent.minimum_balance(account_data_len);
+    
+    // 创建并初始化 mint
+    let mut mint_data = vec![0u8; mint_data_len];
+    let mut mint_lamports = mint_rent_exempt;
+    
+    let mint_account_info = AccountInfo::new(
+        &mint_keypair,
+        false,
+        true,
+        &mut mint_lamports,
+        &mut mint_data,
+        &program_id,
+        false,
+    );
+    
+    let rent_sysvar_id = Pubkey::from_str("SysvarRent111111111111111111111111111111111").unwrap();
+    let rent_data = bincode::serialize(&rent).unwrap();
+    let mut rent_lamports = 0u64;
+    let mut rent_data_mut = rent_data.clone();
+    
+    let rent_sysvar_info = AccountInfo::new(
+        &rent_sysvar_id,
+        false,
+        false,
+        &mut rent_lamports,
+        &mut rent_data_mut,
+        &rent_sysvar_id,
+        false,
+    );
+    
+    Processor::process_initialize_mint(
+        &program_id,
+        &[mint_account_info.clone(), rent_sysvar_info.clone()],
+        decimals,
+        mint_authority,
+        COption::Some(freeze_authority),
+    ).unwrap();
+    
+    // 初始化账户
+    let mut account_data = vec![0u8; account_data_len];
+    let mut account_lamports = account_rent_exempt;
+    
+    let account_info = AccountInfo::new(
+        &account_keypair,
+        false,
+        true,
+        &mut account_lamports,
+        &mut account_data,
+        &program_id,
+        false,
+    );
+    
+    let mut account_owner_lamports = 0u64;
+    let mut account_owner_data = vec![];
+    let account_owner_account_id = Pubkey::default();
+    let account_owner_account_info = AccountInfo::new(
+        &account_owner,
+        false,
+        false,
+        &mut account_owner_lamports,
+        &mut account_owner_data,
+        &account_owner_account_id,
+        false,
+    );
+    
+    Processor::process_initialize_account(
+        &program_id,
+        &[
+            account_info.clone(),
+            mint_account_info.clone(),
+            account_owner_account_info,
+            rent_sysvar_info.clone(),
+        ],
+    ).unwrap();
+    
+    // 批准委托
+    let approve_amount = 500u64;
+    
+    let mut owner_lamports = 0u64;
+    let mut owner_data = vec![];
+    let owner_account_id = Pubkey::default();
+    let owner_account_info = AccountInfo::new(
+        &account_owner,
+        true,
+        false,
+        &mut owner_lamports,
+        &mut owner_data,
+        &owner_account_id,
+        false,
+    );
+    
+    let mut delegate_lamports = 0u64;
+    let mut delegate_data = vec![];
+    let delegate_account_id = Pubkey::default();
+    let delegate_account_info = AccountInfo::new(
+        &delegate,
+        false,
+        false,
+        &mut delegate_lamports,
+        &mut delegate_data,
+        &delegate_account_id,
+        false,
+    );
+    
+    let approve_accounts = vec![
+        account_info.clone(),
+        delegate_account_info,
+        owner_account_info,
+    ];
+    
+    Processor::process_approve(&program_id, &approve_accounts, approve_amount).unwrap();
+    
+    // 冻结账户
+    let mut freeze_authority_lamports = 0u64;
+    let mut freeze_authority_data = vec![];
+    let freeze_authority_account_id = Pubkey::default();
+    let freeze_authority_account_info = AccountInfo::new(
+        &freeze_authority,
+        true,
+        false,
+        &mut freeze_authority_lamports,
+        &mut freeze_authority_data,
+        &freeze_authority_account_id,
+        false,
+    );
+    
+    let freeze_accounts = vec![
+        account_info.clone(),
+        mint_account_info.clone(),
+        freeze_authority_account_info,
+    ];
+    
+    Processor::process_freeze_account(&program_id, &freeze_accounts).unwrap();
+    
+    // 尝试撤销冻结账户的委托（应该失败）
+    let mut revoke_owner_lamports = 0u64;
+    let mut revoke_owner_data = vec![];
+    let revoke_owner_account_id = Pubkey::default();
+    let revoke_owner_account_info = AccountInfo::new(
+        &account_owner,
+        true,
+        false,
+        &mut revoke_owner_lamports,
+        &mut revoke_owner_data,
+        &revoke_owner_account_id,
+        false,
+    );
+    
+    let revoke_accounts = vec![
+        account_info.clone(),
+        revoke_owner_account_info,
+    ];
+    
+    let result = Processor::process_revoke(&program_id, &revoke_accounts);
+    assert!(
+        result.is_err(),
+        "冻结账户不能撤销委托"
+    );
+    
+    println!("✅ 测试通过：冻结账户不能撤销委托");
+}
+
+#[test]
+fn test_set_authority_account_owner() {
+    // ========== 测试设置账户所有者 ==========
+    
+    let program_id = id();
+    let mint_keypair = Pubkey::new_unique();
+    let mint_authority = Pubkey::new_unique();
+    let decimals = 6u8;
+    
+    let account_keypair = Pubkey::new_unique();
+    let old_owner = Pubkey::new_unique();
+    let new_owner = Pubkey::new_unique();
+    
+    let rent = Rent::default();
+    let mint_data_len = Mint::LEN;
+    let account_data_len = Account::LEN;
+    let mint_rent_exempt = rent.minimum_balance(mint_data_len);
+    let account_rent_exempt = rent.minimum_balance(account_data_len);
+    
+    // 创建并初始化 mint
+    let mut mint_data = vec![0u8; mint_data_len];
+    let mut mint_lamports = mint_rent_exempt;
+    
+    let mint_account_info = AccountInfo::new(
+        &mint_keypair,
+        false,
+        true,
+        &mut mint_lamports,
+        &mut mint_data,
+        &program_id,
+        false,
+    );
+    
+    let rent_sysvar_id = Pubkey::from_str("SysvarRent111111111111111111111111111111111").unwrap();
+    let rent_data = bincode::serialize(&rent).unwrap();
+    let mut rent_lamports = 0u64;
+    let mut rent_data_mut = rent_data.clone();
+    
+    let rent_sysvar_info = AccountInfo::new(
+        &rent_sysvar_id,
+        false,
+        false,
+        &mut rent_lamports,
+        &mut rent_data_mut,
+        &rent_sysvar_id,
+        false,
+    );
+    
+    Processor::process_initialize_mint(
+        &program_id,
+        &[mint_account_info.clone(), rent_sysvar_info.clone()],
+        decimals,
+        mint_authority,
+        COption::None,
+    ).unwrap();
+    
+    // 初始化账户（使用 old_owner）
+    let mut account_data = vec![0u8; account_data_len];
+    let mut account_lamports = account_rent_exempt;
+    
+    let account_info = AccountInfo::new(
+        &account_keypair,
+        false,
+        true,
+        &mut account_lamports,
+        &mut account_data,
+        &program_id,
+        false,
+    );
+    
+    let mut account_owner_lamports = 0u64;
+    let mut account_owner_data = vec![];
+    let account_owner_account_id = Pubkey::default();
+    let account_owner_account_info = AccountInfo::new(
+        &old_owner,
+        false,
+        false,
+        &mut account_owner_lamports,
+        &mut account_owner_data,
+        &account_owner_account_id,
+        false,
+    );
+    
+    Processor::process_initialize_account(
+        &program_id,
+        &[
+            account_info.clone(),
+            mint_account_info.clone(),
+            account_owner_account_info,
+            rent_sysvar_info.clone(),
+        ],
+    ).unwrap();
+    
+    // 验证初始所有者
+    let account_before = Account::unpack(&account_info.data.borrow()).unwrap();
+    assert_eq!(account_before.owner, old_owner, "初始所有者应该是 old_owner");
+    
+    // 设置新所有者
+    use spl_token::instruction::AuthorityType;
+    
+    let mut old_owner_lamports = 0u64;
+    let mut old_owner_data = vec![];
+    let old_owner_account_id = Pubkey::default();
+    let old_owner_account_info = AccountInfo::new(
+        &old_owner,
+        true, // must be signer
+        false,
+        &mut old_owner_lamports,
+        &mut old_owner_data,
+        &old_owner_account_id,
+        false,
+    );
+    
+    let set_authority_accounts = vec![
+        account_info.clone(),
+        old_owner_account_info,
+    ];
+    
+    Processor::process_set_authority(
+        &program_id,
+        &set_authority_accounts,
+        AuthorityType::AccountOwner,
+        COption::Some(new_owner),
+    ).unwrap();
+    
+    // 验证新所有者
+    let account_after = Account::unpack(&account_info.data.borrow()).unwrap();
+    assert_eq!(account_after.owner, new_owner, "新所有者应该是 new_owner");
+    assert_eq!(account_after.delegate, COption::None, "委托应该被清除");
+    assert_eq!(account_after.delegated_amount, 0, "委托金额应该被清除");
+    
+    println!("✅ 测试通过：SetAuthority AccountOwner 测试成功");
+}
+
+#[test]
+fn test_set_authority_mint_tokens() {
+    // ========== 测试设置 mint authority ==========
+    
+    let program_id = id();
+    let mint_keypair = Pubkey::new_unique();
+    let old_mint_authority = Pubkey::new_unique();
+    let new_mint_authority = Pubkey::new_unique();
+    let decimals = 6u8;
+    
+    let rent = Rent::default();
+    let mint_data_len = Mint::LEN;
+    let mint_rent_exempt = rent.minimum_balance(mint_data_len);
+    
+    // 创建并初始化 mint（使用 old_mint_authority）
+    let mut mint_data = vec![0u8; mint_data_len];
+    let mut mint_lamports = mint_rent_exempt;
+    
+    let mint_account_info = AccountInfo::new(
+        &mint_keypair,
+        false,
+        true,
+        &mut mint_lamports,
+        &mut mint_data,
+        &program_id,
+        false,
+    );
+    
+    let rent_sysvar_id = Pubkey::from_str("SysvarRent111111111111111111111111111111111").unwrap();
+    let rent_data = bincode::serialize(&rent).unwrap();
+    let mut rent_lamports = 0u64;
+    let mut rent_data_mut = rent_data.clone();
+    
+    let rent_sysvar_info = AccountInfo::new(
+        &rent_sysvar_id,
+        false,
+        false,
+        &mut rent_lamports,
+        &mut rent_data_mut,
+        &rent_sysvar_id,
+        false,
+    );
+    
+    Processor::process_initialize_mint(
+        &program_id,
+        &[mint_account_info.clone(), rent_sysvar_info.clone()],
+        decimals,
+        old_mint_authority,
+        COption::None,
+    ).unwrap();
+    
+    // 验证初始 mint authority
+    let mint_before = Mint::unpack(&mint_account_info.data.borrow()).unwrap();
+    assert_eq!(mint_before.mint_authority, COption::Some(old_mint_authority), "初始 mint authority 应该是 old_mint_authority");
+    
+    // 设置新的 mint authority
+    use spl_token::instruction::AuthorityType;
+    
+    let mut old_mint_authority_lamports = 0u64;
+    let mut old_mint_authority_data = vec![];
+    let old_mint_authority_account_id = Pubkey::default();
+    let old_mint_authority_account_info = AccountInfo::new(
+        &old_mint_authority,
+        true, // must be signer
+        false,
+        &mut old_mint_authority_lamports,
+        &mut old_mint_authority_data,
+        &old_mint_authority_account_id,
+        false,
+    );
+    
+    let set_authority_accounts = vec![
+        mint_account_info.clone(),
+        old_mint_authority_account_info,
+    ];
+    
+    Processor::process_set_authority(
+        &program_id,
+        &set_authority_accounts,
+        AuthorityType::MintTokens,
+        COption::Some(new_mint_authority),
+    ).unwrap();
+    
+    // 验证新的 mint authority
+    let mint_after = Mint::unpack(&mint_account_info.data.borrow()).unwrap();
+    assert_eq!(mint_after.mint_authority, COption::Some(new_mint_authority), "新 mint authority 应该是 new_mint_authority");
+    
+    println!("✅ 测试通过：SetAuthority MintTokens 测试成功");
+}
+
+#[test]
+fn test_set_authority_disable_mint_authority() {
+    // ========== 测试禁用 mint authority ==========
+    
+    let program_id = id();
+    let mint_keypair = Pubkey::new_unique();
+    let mint_authority = Pubkey::new_unique();
+    let decimals = 6u8;
+    
+    let rent = Rent::default();
+    let mint_data_len = Mint::LEN;
+    let mint_rent_exempt = rent.minimum_balance(mint_data_len);
+    
+    // 创建并初始化 mint
+    let mut mint_data = vec![0u8; mint_data_len];
+    let mut mint_lamports = mint_rent_exempt;
+    
+    let mint_account_info = AccountInfo::new(
+        &mint_keypair,
+        false,
+        true,
+        &mut mint_lamports,
+        &mut mint_data,
+        &program_id,
+        false,
+    );
+    
+    let rent_sysvar_id = Pubkey::from_str("SysvarRent111111111111111111111111111111111").unwrap();
+    let rent_data = bincode::serialize(&rent).unwrap();
+    let mut rent_lamports = 0u64;
+    let mut rent_data_mut = rent_data.clone();
+    
+    let rent_sysvar_info = AccountInfo::new(
+        &rent_sysvar_id,
+        false,
+        false,
+        &mut rent_lamports,
+        &mut rent_data_mut,
+        &rent_sysvar_id,
+        false,
+    );
+    
+    Processor::process_initialize_mint(
+        &program_id,
+        &[mint_account_info.clone(), rent_sysvar_info.clone()],
+        decimals,
+        mint_authority,
+        COption::None,
+    ).unwrap();
+    
+    // 禁用 mint authority（设置为 None）
+    use spl_token::instruction::AuthorityType;
+    
+    let mut mint_authority_lamports = 0u64;
+    let mut mint_authority_data = vec![];
+    let mint_authority_account_id = Pubkey::default();
+    let mint_authority_account_info = AccountInfo::new(
+        &mint_authority,
+        true,
+        false,
+        &mut mint_authority_lamports,
+        &mut mint_authority_data,
+        &mint_authority_account_id,
+        false,
+    );
+    
+    let set_authority_accounts = vec![
+        mint_account_info.clone(),
+        mint_authority_account_info,
+    ];
+    
+    Processor::process_set_authority(
+        &program_id,
+        &set_authority_accounts,
+        AuthorityType::MintTokens,
+        COption::None, // 禁用 mint authority
+    ).unwrap();
+    
+    // 验证 mint authority 已被禁用
+    let mint_after = Mint::unpack(&mint_account_info.data.borrow()).unwrap();
+    assert_eq!(mint_after.mint_authority, COption::None, "mint authority 应该已被禁用");
+    
+    // 尝试再次设置 mint authority（应该失败，因为已经被禁用）
+    let mut fake_authority_lamports = 0u64;
+    let mut fake_authority_data = vec![];
+    let fake_authority_account_id = Pubkey::default();
+    let fake_authority_account_info = AccountInfo::new(
+        &mint_authority,
+        true,
+        false,
+        &mut fake_authority_lamports,
+        &mut fake_authority_data,
+        &fake_authority_account_id,
+        false,
+    );
+    
+    let set_authority_accounts2 = vec![
+        mint_account_info.clone(),
+        fake_authority_account_info,
+    ];
+    
+    let result = Processor::process_set_authority(
+        &program_id,
+        &set_authority_accounts2,
+        AuthorityType::MintTokens,
+        COption::Some(Pubkey::new_unique()),
+    );
+    
+    assert!(
+        result.is_err(),
+        "禁用后的 mint authority 不能再设置"
+    );
+    
+    println!("✅ 测试通过：禁用 mint authority 测试成功");
+}
+
+#[test]
+fn test_transfer_checked() {
+    // ========== 测试 TransferChecked 指令 ==========
+    
+    let program_id = id();
+    let mint_keypair = Pubkey::new_unique();
+    let mint_authority = Pubkey::new_unique();
+    let decimals = 6u8;
+    
+    let source_account_keypair = Pubkey::new_unique();
+    let destination_account_keypair = Pubkey::new_unique();
+    let source_owner = Pubkey::new_unique();
+    let destination_owner = Pubkey::new_unique();
+    
+    let rent = Rent::default();
+    let mint_data_len = Mint::LEN;
+    let account_data_len = Account::LEN;
+    let mint_rent_exempt = rent.minimum_balance(mint_data_len);
+    let account_rent_exempt = rent.minimum_balance(account_data_len);
+    
+    // 创建并初始化 mint
+    let mut mint_data = vec![0u8; mint_data_len];
+    let mut mint_lamports = mint_rent_exempt;
+    
+    let mint_account_info = AccountInfo::new(
+        &mint_keypair,
+        false,
+        true,
+        &mut mint_lamports,
+        &mut mint_data,
+        &program_id,
+        false,
+    );
+    
+    let rent_sysvar_id = Pubkey::from_str("SysvarRent111111111111111111111111111111111").unwrap();
+    let rent_data = bincode::serialize(&rent).unwrap();
+    let mut rent_lamports = 0u64;
+    let mut rent_data_mut = rent_data.clone();
+    
+    let rent_sysvar_info = AccountInfo::new(
+        &rent_sysvar_id,
+        false,
+        false,
+        &mut rent_lamports,
+        &mut rent_data_mut,
+        &rent_sysvar_id,
+        false,
+    );
+    
+    Processor::process_initialize_mint(
+        &program_id,
+        &[mint_account_info.clone(), rent_sysvar_info.clone()],
+        decimals,
+        mint_authority,
+        COption::None,
+    ).unwrap();
+    
+    // 初始化源账户和目标账户
+    let mut source_account_data = vec![0u8; account_data_len];
+    let mut source_account_lamports = account_rent_exempt;
+    
+    let source_account_info = AccountInfo::new(
+        &source_account_keypair,
+        false,
+        true,
+        &mut source_account_lamports,
+        &mut source_account_data,
+        &program_id,
+        false,
+    );
+    
+    let mut destination_account_data = vec![0u8; account_data_len];
+    let mut destination_account_lamports = account_rent_exempt;
+    
+    let destination_account_info = AccountInfo::new(
+        &destination_account_keypair,
+        false,
+        true,
+        &mut destination_account_lamports,
+        &mut destination_account_data,
+        &program_id,
+        false,
+    );
+    
+    let mut source_owner_lamports = 0u64;
+    let mut source_owner_data = vec![];
+    let source_owner_account_id = Pubkey::default();
+    let source_owner_account_info = AccountInfo::new(
+        &source_owner,
+        false,
+        false,
+        &mut source_owner_lamports,
+        &mut source_owner_data,
+        &source_owner_account_id,
+        false,
+    );
+    
+    Processor::process_initialize_account(
+        &program_id,
+        &[
+            source_account_info.clone(),
+            mint_account_info.clone(),
+            source_owner_account_info,
+            rent_sysvar_info.clone(),
+        ],
+    ).unwrap();
+    
+    let mut destination_owner_lamports = 0u64;
+    let mut destination_owner_data = vec![];
+    let destination_owner_account_id = Pubkey::default();
+    let destination_owner_account_info = AccountInfo::new(
+        &destination_owner,
+        false,
+        false,
+        &mut destination_owner_lamports,
+        &mut destination_owner_data,
+        &destination_owner_account_id,
+        false,
+    );
+    
+    Processor::process_initialize_account(
+        &program_id,
+        &[
+            destination_account_info.clone(),
+            mint_account_info.clone(),
+            destination_owner_account_info,
+            rent_sysvar_info.clone(),
+        ],
+    ).unwrap();
+    
+    // 给源账户充值
+    let mint_amount = 1000u64;
+    
+    let mut mint_authority_lamports = 0u64;
+    let mut mint_authority_data = vec![];
+    let mint_authority_account_id = Pubkey::default();
+    let mint_authority_account_info = AccountInfo::new(
+        &mint_authority,
+        true,
+        false,
+        &mut mint_authority_lamports,
+        &mut mint_authority_data,
+        &mint_authority_account_id,
+        false,
+    );
+    
+    let mint_to_accounts = vec![
+        mint_account_info.clone(),
+        source_account_info.clone(),
+        mint_authority_account_info,
+    ];
+    
+    Processor::process_mint_to(&program_id, &mint_to_accounts, mint_amount).unwrap();
+    
+    // 使用 TransferChecked 进行转账
+    let transfer_amount = 200u64;
+    
+    let mut source_owner_lamports2 = 0u64;
+    let mut source_owner_data2 = vec![];
+    let source_owner_account_id2 = Pubkey::default();
+    let source_owner_account_info2 = AccountInfo::new(
+        &source_owner,
+        true,
+        false,
+        &mut source_owner_lamports2,
+        &mut source_owner_data2,
+        &source_owner_account_id2,
+        false,
+    );
+    
+    // TransferChecked accounts: source, mint, destination, authority
+    let transfer_checked_accounts = vec![
+        source_account_info.clone(),
+        mint_account_info.clone(),
+        destination_account_info.clone(),
+        source_owner_account_info2,
+    ];
+    
+    Processor::process_transfer(
+        &program_id,
+        &transfer_checked_accounts,
+        transfer_amount,
+        Some(decimals), // 提供 decimals 进行验证
+    ).unwrap();
+    
+    // 验证转账结果
+    let source_account_after = Account::unpack(&source_account_info.data.borrow()).unwrap();
+    let destination_account_after = Account::unpack(&destination_account_info.data.borrow()).unwrap();
+    
+    assert_eq!(source_account_after.amount, 800, "源账户余额应该减少 200，剩余 800");
+    assert_eq!(destination_account_after.amount, 200, "目标账户余额应该增加 200");
+    
+    println!("✅ 测试通过：TransferChecked 指令测试成功");
+}
+
+#[test]
+fn test_transfer_checked_decimals_mismatch_should_fail() {
+    // ========== 测试 TransferChecked decimals 不匹配应该失败 ==========
+    
+    let program_id = id();
+    let mint_keypair = Pubkey::new_unique();
+    let mint_authority = Pubkey::new_unique();
+    let decimals = 6u8;
+    
+    let source_account_keypair = Pubkey::new_unique();
+    let destination_account_keypair = Pubkey::new_unique();
+    let source_owner = Pubkey::new_unique();
+    let destination_owner = Pubkey::new_unique();
+    
+    let rent = Rent::default();
+    let mint_data_len = Mint::LEN;
+    let account_data_len = Account::LEN;
+    let mint_rent_exempt = rent.minimum_balance(mint_data_len);
+    let account_rent_exempt = rent.minimum_balance(account_data_len);
+    
+    // 创建并初始化 mint（decimals = 6）
+    let mut mint_data = vec![0u8; mint_data_len];
+    let mut mint_lamports = mint_rent_exempt;
+    
+    let mint_account_info = AccountInfo::new(
+        &mint_keypair,
+        false,
+        true,
+        &mut mint_lamports,
+        &mut mint_data,
+        &program_id,
+        false,
+    );
+    
+    let rent_sysvar_id = Pubkey::from_str("SysvarRent111111111111111111111111111111111").unwrap();
+    let rent_data = bincode::serialize(&rent).unwrap();
+    let mut rent_lamports = 0u64;
+    let mut rent_data_mut = rent_data.clone();
+    
+    let rent_sysvar_info = AccountInfo::new(
+        &rent_sysvar_id,
+        false,
+        false,
+        &mut rent_lamports,
+        &mut rent_data_mut,
+        &rent_sysvar_id,
+        false,
+    );
+    
+    Processor::process_initialize_mint(
+        &program_id,
+        &[mint_account_info.clone(), rent_sysvar_info.clone()],
+        decimals,
+        mint_authority,
+        COption::None,
+    ).unwrap();
+    
+    // 初始化源账户和目标账户
+    let mut source_account_data = vec![0u8; account_data_len];
+    let mut source_account_lamports = account_rent_exempt;
+    
+    let source_account_info = AccountInfo::new(
+        &source_account_keypair,
+        false,
+        true,
+        &mut source_account_lamports,
+        &mut source_account_data,
+        &program_id,
+        false,
+    );
+    
+    let mut destination_account_data = vec![0u8; account_data_len];
+    let mut destination_account_lamports = account_rent_exempt;
+    
+    let destination_account_info = AccountInfo::new(
+        &destination_account_keypair,
+        false,
+        true,
+        &mut destination_account_lamports,
+        &mut destination_account_data,
+        &program_id,
+        false,
+    );
+    
+    let mut source_owner_lamports = 0u64;
+    let mut source_owner_data = vec![];
+    let source_owner_account_id = Pubkey::default();
+    let source_owner_account_info = AccountInfo::new(
+        &source_owner,
+        false,
+        false,
+        &mut source_owner_lamports,
+        &mut source_owner_data,
+        &source_owner_account_id,
+        false,
+    );
+    
+    Processor::process_initialize_account(
+        &program_id,
+        &[
+            source_account_info.clone(),
+            mint_account_info.clone(),
+            source_owner_account_info,
+            rent_sysvar_info.clone(),
+        ],
+    ).unwrap();
+    
+    let mut destination_owner_lamports = 0u64;
+    let mut destination_owner_data = vec![];
+    let destination_owner_account_id = Pubkey::default();
+    let destination_owner_account_info = AccountInfo::new(
+        &destination_owner,
+        false,
+        false,
+        &mut destination_owner_lamports,
+        &mut destination_owner_data,
+        &destination_owner_account_id,
+        false,
+    );
+    
+    Processor::process_initialize_account(
+        &program_id,
+        &[
+            destination_account_info.clone(),
+            mint_account_info.clone(),
+            destination_owner_account_info,
+            rent_sysvar_info.clone(),
+        ],
+    ).unwrap();
+    
+    // 给源账户充值
+    let mint_amount = 1000u64;
+    
+    let mut mint_authority_lamports = 0u64;
+    let mut mint_authority_data = vec![];
+    let mint_authority_account_id = Pubkey::default();
+    let mint_authority_account_info = AccountInfo::new(
+        &mint_authority,
+        true,
+        false,
+        &mut mint_authority_lamports,
+        &mut mint_authority_data,
+        &mint_authority_account_id,
+        false,
+    );
+    
+    let mint_to_accounts = vec![
+        mint_account_info.clone(),
+        source_account_info.clone(),
+        mint_authority_account_info,
+    ];
+    
+    Processor::process_mint_to(&program_id, &mint_to_accounts, mint_amount).unwrap();
+    
+    // 尝试使用错误的 decimals 进行 TransferChecked（应该失败）
+    let transfer_amount = 200u64;
+    let wrong_decimals = 9u8; // 错误的 decimals（mint 是 6）
+    
+    let mut source_owner_lamports2 = 0u64;
+    let mut source_owner_data2 = vec![];
+    let source_owner_account_id2 = Pubkey::default();
+    let source_owner_account_info2 = AccountInfo::new(
+        &source_owner,
+        true,
+        false,
+        &mut source_owner_lamports2,
+        &mut source_owner_data2,
+        &source_owner_account_id2,
+        false,
+    );
+    
+    let transfer_checked_accounts = vec![
+        source_account_info.clone(),
+        mint_account_info.clone(),
+        destination_account_info.clone(),
+        source_owner_account_info2,
+    ];
+    
+    let result = Processor::process_transfer(
+        &program_id,
+        &transfer_checked_accounts,
+        transfer_amount,
+        Some(wrong_decimals), // 错误的 decimals
+    );
+    
+    assert!(
+        result.is_err(),
+        "decimals 不匹配的 TransferChecked 应该失败"
+    );
+    
+    println!("✅ 测试通过：TransferChecked decimals 不匹配应该失败");
 }
