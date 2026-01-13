@@ -4,7 +4,7 @@ use {
     solana_program_error::ProgramError,
     solana_program_option::COption,
     solana_program_pack::{IsInitialized, Pack, Sealed},
-    solana_pubkey::{Pubkey, PUBKEY_BYTES},
+    solana_pubkey::Pubkey,
 };
 
 /// Mint data.
@@ -134,14 +134,43 @@ fn unpack_coption_key(src: &[u8; 36]) -> Result<COption<Pubkey>, ProgramError> {
 
 impl Sealed for Account {}
 impl Pack for Account {
-    const LEN: usize = 165;
+    const LEN: usize = 73; // mint (32) + owner (32) + amount (8) + is_initialized (1)
     
-    fn pack_into_slice(&self, _dst: &mut [u8]) {
-        // TODO: Implement packing
+    fn pack_into_slice(&self, dst: &mut [u8]) {
+        let dst = array_mut_ref![dst, 0, 73];
+        let (mint_dst, owner_dst, amount_dst, is_initialized_dst) = mut_array_refs![dst, 32, 32, 8, 1];
+        mint_dst.copy_from_slice(self.mint.as_ref());
+        owner_dst.copy_from_slice(self.owner.as_ref());
+        *amount_dst = self.amount.to_le_bytes();
+        is_initialized_dst[0] = self.is_initialized as u8;
     }
     
-    fn unpack_from_slice(_src: &[u8]) -> Result<Self, solana_program_error::ProgramError> {
-        // TODO: Implement unpacking
-        Err(solana_program_error::ProgramError::InvalidAccountData)
+    fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
+        if src.len() != Self::LEN {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        let src = array_ref![src, 0, 73];
+        let (mint, owner, amount, is_initialized) = array_refs![src, 32, 32, 8, 1];
+        let mint = Pubkey::new_from_array(*mint);
+        let owner = Pubkey::new_from_array(*owner);
+        let amount = u64::from_le_bytes(*amount);
+        let is_initialized = match is_initialized {
+            [0] => false,
+            [1] => true,
+            _ => return Err(ProgramError::InvalidAccountData),
+        };
+        Ok(Account {
+            mint,
+            owner,
+            amount,
+            is_initialized,
+        })
+    }
+}
+
+impl Account {
+    /// Unpacks an Account from a byte slice without checking initialization state
+    pub fn unpack_unchecked(src: &[u8]) -> Result<Self, ProgramError> {
+        <Self as Pack>::unpack_from_slice(src)
     }
 }
