@@ -9,6 +9,8 @@
 pub mod error;
 /// Instruction types for the token program.
 pub mod instruction;
+/// Native mint utilities.
+pub mod native_mint;
 /// Instruction processor for the token program.
 pub mod processor;
 /// State types for the token program.

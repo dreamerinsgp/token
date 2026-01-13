@@ -33,6 +33,8 @@ pub struct Account {
     pub amount: u64,
     /// Is `true` if this structure has been initialized
     pub is_initialized: bool,
+    /// For native accounts, the rent-exempt reserve amount
+    pub is_native: COption<u64>,
 }
 
 
@@ -132,25 +134,59 @@ fn unpack_coption_key(src: &[u8; 36]) -> Result<COption<Pubkey>, ProgramError> {
     }
 }
 
+/// Helper function to pack a COption<u64> into a 36-byte slice
+fn pack_coption_u64(src: &COption<u64>, dst: &mut [u8; 36]) {
+    let (tag, body) = mut_array_refs![dst, 4, 32];
+    match src {
+        COption::Some(value) => {
+            *tag = [1, 0, 0, 0];
+            let value_bytes = value.to_le_bytes();
+            body[..8].copy_from_slice(&value_bytes);
+            // Zero out the rest
+            for i in 8..32 {
+                body[i] = 0;
+            }
+        }
+        COption::None => {
+            *tag = [0; 4];
+            body.fill(0);
+        }
+    }
+}
+
+/// Helper function to unpack a COption<u64> from a 36-byte slice
+fn unpack_coption_u64(src: &[u8; 36]) -> Result<COption<u64>, ProgramError> {
+    let (tag, body) = array_refs![src, 4, 32];
+    match *tag {
+        [0, 0, 0, 0] => Ok(COption::None),
+        [1, 0, 0, 0] => {
+            let value_bytes: [u8; 8] = body[..8].try_into().map_err(|_| ProgramError::InvalidAccountData)?;
+            Ok(COption::Some(u64::from_le_bytes(value_bytes)))
+        }
+        _ => Err(ProgramError::InvalidAccountData),
+    }
+}
+
 impl Sealed for Account {}
 impl Pack for Account {
-    const LEN: usize = 73; // mint (32) + owner (32) + amount (8) + is_initialized (1)
+    const LEN: usize = 109; // mint (32) + owner (32) + amount (8) + is_initialized (1) + is_native (36)
     
     fn pack_into_slice(&self, dst: &mut [u8]) {
-        let dst = array_mut_ref![dst, 0, 73];
-        let (mint_dst, owner_dst, amount_dst, is_initialized_dst) = mut_array_refs![dst, 32, 32, 8, 1];
+        let dst = array_mut_ref![dst, 0, 109];
+        let (mint_dst, owner_dst, amount_dst, is_initialized_dst, is_native_dst) = mut_array_refs![dst, 32, 32, 8, 1, 36];
         mint_dst.copy_from_slice(self.mint.as_ref());
         owner_dst.copy_from_slice(self.owner.as_ref());
         *amount_dst = self.amount.to_le_bytes();
         is_initialized_dst[0] = self.is_initialized as u8;
+        pack_coption_u64(&self.is_native, is_native_dst);
     }
     
     fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
         if src.len() != Self::LEN {
             return Err(ProgramError::InvalidAccountData);
         }
-        let src = array_ref![src, 0, 73];
-        let (mint, owner, amount, is_initialized) = array_refs![src, 32, 32, 8, 1];
+        let src = array_ref![src, 0, 109];
+        let (mint, owner, amount, is_initialized, is_native) = array_refs![src, 32, 32, 8, 1, 36];
         let mint = Pubkey::new_from_array(*mint);
         let owner = Pubkey::new_from_array(*owner);
         let amount = u64::from_le_bytes(*amount);
@@ -159,11 +195,13 @@ impl Pack for Account {
             [1] => true,
             _ => return Err(ProgramError::InvalidAccountData),
         };
+        let is_native = unpack_coption_u64(is_native)?;
         Ok(Account {
             mint,
             owner,
             amount,
             is_initialized,
+            is_native,
         })
     }
 }

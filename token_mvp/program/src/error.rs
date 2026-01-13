@@ -42,6 +42,14 @@ pub enum TokenError {
     /// Invalid instruction
     #[error("Invalid instruction")]
     InvalidInstruction,
+    
+    /// Invalid state
+    #[error("Invalid state")]
+    InvalidState,
+    
+    /// Non-native account not supported for this operation
+    #[error("Non-native account not supported")]
+    NonNativeNotSupported,
 }
 
 impl From<TokenError> for ProgramError {

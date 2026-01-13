@@ -3,6 +3,7 @@ use {
         check_program_account,
         error::TokenError,
         instruction::TokenInstruction,
+        native_mint,
         state::{Account, Mint},
     },
     solana_account_info::{next_account_info, AccountInfo},
@@ -147,11 +148,26 @@ impl Processor {
             return Err(solana_program_error::ProgramError::InvalidAccountData);
         }
         
+        // Check if this is a native mint account
+        let is_native_mint = mint_info.key == &native_mint::id();
+        
         // Set account fields
         account.mint = *mint_info.key;
         account.owner = *owner_info.key;
-        account.amount = 0; // Initialize with zero balance
         account.is_initialized = true;
+        
+        // For native accounts, set is_native and calculate initial balance
+        if is_native_mint {
+            let rent_exempt_reserve = rent.minimum_balance(account_data_len);
+            account.is_native = COption::Some(rent_exempt_reserve);
+            account.amount = account_info
+                .lamports()
+                .checked_sub(rent_exempt_reserve)
+                .ok_or(TokenError::Overflow)?;
+        } else {
+            account.is_native = COption::None;
+            account.amount = 0; // Initialize with zero balance
+        }
         
         // Log debug information
         msg!("=== InitializeAccount Debug Info ===");
@@ -502,6 +518,76 @@ impl Processor {
         Ok(())
     }
 
+    /// Processes a SyncNative instruction
+    /// 
+    /// SyncNative synchronizes the token account balance with the underlying SOL balance
+    /// for native (wrapped SOL) accounts. For native accounts, the token balance equals
+    /// the account's lamports minus the rent-exempt reserve stored in is_native field.
+    /// 
+    /// Accounts:
+    /// - [writable] The native account to sync
+    pub fn process_sync_native(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+    ) -> ProgramResult {
+        let account_info_iter = &mut accounts.iter();
+        
+        // Extract account:
+        // 0. [writable] The native account to sync
+        let native_account_info = next_account_info(account_info_iter)?;
+        
+        // Validate account is owned by this program
+        check_program_account(native_account_info)?;
+        
+        // Unpack account
+        let mut native_account = Account::unpack(&native_account_info.data.borrow())?;
+        
+        // Check if this is a native account by checking is_native field
+        // Only native accounts have is_native set to Some(rent_exempt_reserve)
+        if let COption::Some(rent_exempt_reserve) = native_account.is_native {
+            // Calculate new amount: lamports - rent_exempt_reserve
+            let new_amount = native_account_info
+                .lamports()
+                .checked_sub(rent_exempt_reserve)
+                .ok_or(TokenError::Overflow)?;
+            
+            // Validate: new amount should not be less than current amount
+            // This prevents the balance from decreasing unexpectedly (e.g., if SOL was withdrawn)
+            // The balance can only increase when SOL is sent directly to the account
+            if new_amount < native_account.amount {
+                return Err(TokenError::InvalidState.into());
+            }
+            
+            //Native accoutn with 1 SOL ;
+            //Rent is 0.0001 SOl
+            //token Balance : 0.999SOl 
+
+            // Update account balance
+            native_account.amount = new_amount;
+            
+            // Log debug information
+            msg!("=== SyncNative Debug Info ===");
+            msg!("[native_account_info] Account Information:");
+            msg!("  - key: {}", native_account_info.key);
+            msg!("  - lamports: {}", native_account_info.lamports());
+            msg!("  - rent_exempt_reserve: {} (from is_native field)", rent_exempt_reserve);
+            msg!("  - amount before: {}", native_account.amount);
+            msg!("  - amount after: {} (lamports - rent_exempt_reserve)", new_amount);
+            
+            // Pack and save account data
+            Account::pack(native_account, &mut native_account_info.data.borrow_mut())?;
+            
+            msg!("✅ SyncNative completed successfully");
+            msg!("========================================");
+        } else {
+            // Not a native account, return error
+            // Only accounts initialized with native mint have is_native set
+            return Err(TokenError::NonNativeNotSupported.into());
+        }
+        
+        Ok(())
+    }
+
     /// Main instruction processing router
     pub fn process(
         program_id: &Pubkey,
@@ -535,6 +621,9 @@ impl Processor {
             }
             TokenInstruction::Burn { amount } => {
                 Self::process_burn(program_id, accounts, amount)
+            }
+            TokenInstruction::SyncNative => {
+                Self::process_sync_native(program_id, accounts)
             }
         }
     }

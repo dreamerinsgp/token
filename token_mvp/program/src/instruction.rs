@@ -35,6 +35,8 @@ pub enum TokenInstruction {
         /// Amount of tokens to burn
         amount: u64,
     },
+    /// Sync native account balance
+    SyncNative,
 }
 
 
@@ -82,6 +84,7 @@ impl TokenInstruction {
                     .ok_or(TokenError::InvalidInstruction)?;
                 Self::Burn { amount }
             }
+            9 => Self::SyncNative,
             _ => return Err(TokenError::InvalidInstruction.into()),
         })
     }
