@@ -35,6 +35,10 @@ pub struct Account {
     pub is_initialized: bool,
     /// For native accounts, the rent-exempt reserve amount
     pub is_native: COption<u64>,
+    /// Optional delegate account that can transfer tokens on behalf of the owner
+    pub delegate: COption<Pubkey>,
+    /// The amount of tokens the delegate is approved for
+    pub delegated_amount: u64,
 }
 
 
@@ -169,39 +173,77 @@ fn unpack_coption_u64(src: &[u8; 36]) -> Result<COption<u64>, ProgramError> {
 
 impl Sealed for Account {}
 impl Pack for Account {
-    const LEN: usize = 109; // mint (32) + owner (32) + amount (8) + is_initialized (1) + is_native (36)
+    const LEN: usize = 181; // mint (32) + owner (32) + amount (8) + is_initialized (1) + is_native (36) + delegate (36) + delegated_amount (8)
     
     fn pack_into_slice(&self, dst: &mut [u8]) {
-        let dst = array_mut_ref![dst, 0, 109];
-        let (mint_dst, owner_dst, amount_dst, is_initialized_dst, is_native_dst) = mut_array_refs![dst, 32, 32, 8, 1, 36];
-        mint_dst.copy_from_slice(self.mint.as_ref());
-        owner_dst.copy_from_slice(self.owner.as_ref());
-        *amount_dst = self.amount.to_le_bytes();
-        is_initialized_dst[0] = self.is_initialized as u8;
+        // Pack fields in order: mint (32) + owner (32) + amount (8) + is_initialized (1) + is_native (36) + delegate (36) + delegated_amount (8)
+        let dst = array_mut_ref![dst, 0, 181];
+        
+        // Pack mint (bytes 0-31)
+        dst[0..32].copy_from_slice(self.mint.as_ref());
+        
+        // Pack owner (bytes 32-63)
+        dst[32..64].copy_from_slice(self.owner.as_ref());
+        
+        // Pack amount (bytes 64-71)
+        dst[64..72].copy_from_slice(&self.amount.to_le_bytes());
+        
+        // Pack is_initialized (byte 72)
+        dst[72] = self.is_initialized as u8;
+        
+        // Pack is_native (bytes 73-108)
+        let is_native_dst = array_mut_ref![dst, 73, 36];
         pack_coption_u64(&self.is_native, is_native_dst);
+        
+        // Pack delegate (bytes 109-144)
+        let delegate_dst = array_mut_ref![dst, 109, 36];
+        pack_coption_key(&self.delegate, delegate_dst);
+        
+        // Pack delegated_amount (bytes 145-152)
+        dst[145..153].copy_from_slice(&self.delegated_amount.to_le_bytes());
     }
     
     fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
         if src.len() != Self::LEN {
             return Err(ProgramError::InvalidAccountData);
         }
-        let src = array_ref![src, 0, 109];
-        let (mint, owner, amount, is_initialized, is_native) = array_refs![src, 32, 32, 8, 1, 36];
-        let mint = Pubkey::new_from_array(*mint);
-        let owner = Pubkey::new_from_array(*owner);
-        let amount = u64::from_le_bytes(*amount);
-        let is_initialized = match is_initialized {
-            [0] => false,
-            [1] => true,
+        let src = array_ref![src, 0, 181];
+        
+        // Unpack mint (bytes 0-31)
+        let mint = Pubkey::new_from_array(*array_ref![src, 0, 32]);
+        
+        // Unpack owner (bytes 32-63)
+        let owner = Pubkey::new_from_array(*array_ref![src, 32, 32]);
+        
+        // Unpack amount (bytes 64-71)
+        let amount = u64::from_le_bytes(*array_ref![src, 64, 8]);
+        
+        // Unpack is_initialized (byte 72)
+        let is_initialized = match src[72] {
+            0 => false,
+            1 => true,
             _ => return Err(ProgramError::InvalidAccountData),
         };
-        let is_native = unpack_coption_u64(is_native)?;
+        
+        // Unpack is_native (bytes 73-108)
+        let is_native_src = array_ref![src, 73, 36];
+        let is_native = unpack_coption_u64(is_native_src)?;
+        
+        // Unpack delegate (bytes 109-144)
+        let delegate_src = array_ref![src, 109, 36];
+        let delegate = unpack_coption_key(delegate_src)?;
+        
+        // Unpack delegated_amount (bytes 145-152)
+        let delegated_amount = u64::from_le_bytes(*array_ref![src, 145, 8]);
+        
         Ok(Account {
             mint,
             owner,
             amount,
             is_initialized,
             is_native,
+            delegate,
+            delegated_amount,
         })
     }
 }

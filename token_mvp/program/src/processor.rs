@@ -155,6 +155,8 @@ impl Processor {
         account.mint = *mint_info.key;
         account.owner = *owner_info.key;
         account.is_initialized = true;
+        account.delegate = COption::None;
+        account.delegated_amount = 0;
         
         // For native accounts, set is_native and calculate initial balance
         if is_native_mint {
@@ -251,18 +253,51 @@ impl Processor {
             return Err(TokenError::MintMismatch.into());
         }
         
-        // Validate authority is the owner (for now, we don't support delegate)
-        if source_account.owner != *authority_info.key {
-            return Err(TokenError::InvalidOwner.into());
-        }
+        // Check for self-transfer (no-op)
+        let self_transfer = source_info.key == destination_info.key;
         
-        // Validate authority is a signer
-        if !authority_info.is_signer {
-            return Err(TokenError::InvalidOwner.into());
+        // Validate authority: check if it's the owner or a delegate
+        match source_account.delegate {
+            COption::Some(ref delegate) if delegate == authority_info.key => {
+                // Authority is a delegate
+                // Validate delegate is a signer
+                if !authority_info.is_signer {
+                    return Err(TokenError::InvalidOwner.into());
+                }
+                
+                // Validate sufficient delegated amount
+                if source_account.delegated_amount < amount {
+                    return Err(TokenError::InsufficientFunds.into());
+                }
+                
+                // Decrease delegated amount if not self-transfer
+                if !self_transfer {
+                    source_account.delegated_amount = source_account
+                        .delegated_amount
+                        .checked_sub(amount)
+                        .ok_or(TokenError::Overflow)?;
+                    
+                    // If delegated amount becomes 0, clear delegate
+                    if source_account.delegated_amount == 0 {
+                        source_account.delegate = COption::None;
+                    }
+                }
+            }
+            _ => {
+                // Authority must be the owner
+                if source_account.owner != *authority_info.key {
+                    return Err(TokenError::InvalidOwner.into());
+                }
+                
+                // Validate owner is a signer
+                if !authority_info.is_signer {
+                    return Err(TokenError::InvalidOwner.into());
+                }
+            }
         }
         
         // Check for self-transfer (no-op)
-        if source_info.key == destination_info.key {
+        if self_transfer {
             msg!("Self-transfer detected, no-op");
             return Ok(());
         }
@@ -300,7 +335,17 @@ impl Processor {
         msg!("  - amount after: {}", destination_account.amount);
         
         msg!("[authority]");
-        msg!("  - key: {} (must be source owner)", authority_info.key);
+        match source_account.delegate {
+            COption::Some(ref delegate) if delegate == authority_info.key => {
+                msg!("  - key: {} (delegate)", authority_info.key);
+                msg!("  - delegated_amount before: {} (will subtract {})", 
+                     source_account.delegated_amount + amount, amount);
+                msg!("  - delegated_amount after: {}", source_account.delegated_amount);
+            }
+            _ => {
+                msg!("  - key: {} (must be source owner)", authority_info.key);
+            }
+        }
         msg!("  - is_signer: {}", authority_info.is_signer);
         
         // Pack and save account data
@@ -561,6 +606,9 @@ impl Processor {
             //Native accoutn with 1 SOL ;
             //Rent is 0.0001 SOl
             //token Balance : 0.999SOl 
+            // Alice->1.5 SOL
+            //token Balance: 0.999SOL
+            // 1.5 SOL - 0.0001SOL = 1.499 OSL. 
 
             // Update account balance
             native_account.amount = new_amount;
@@ -584,6 +632,88 @@ impl Processor {
             // Only accounts initialized with native mint have is_native set
             return Err(TokenError::NonNativeNotSupported.into());
         }
+        
+        Ok(())
+    }
+
+    /// Processes an Approve instruction
+    /// 
+    /// Approve grants a delegate authority to transfer tokens on behalf of the account owner.
+    /// The delegate can transfer up to the approved amount.
+    /// 
+    /// Accounts:
+    /// - [writable] The source account
+    /// - [] The delegate
+    /// - [signer] The source account owner
+    pub fn process_approve(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        amount: u64,
+    ) -> ProgramResult {
+        let account_info_iter = &mut accounts.iter();
+        
+        // Extract accounts in order:
+        // 0. [writable] The source account
+        // 1. [] The delegate
+        // 2. [signer] The source account owner
+        let source_account_info = next_account_info(account_info_iter)?;
+        let delegate_info = next_account_info(account_info_iter)?;
+        let owner_info = next_account_info(account_info_iter)?;
+        
+        // Validate account is owned by this program
+        check_program_account(source_account_info)?;
+        
+        // Validate account is writable
+        if !source_account_info.is_writable {
+            return Err(TokenError::InvalidOwner.into());
+        }
+        
+        // Unpack source account
+        let mut source_account = Account::unpack(&source_account_info.data.borrow())?;
+        
+        // Validate account is initialized
+        if !source_account.is_initialized {
+            return Err(TokenError::NotInitialized.into());
+        }
+        
+        // Validate owner is the account owner
+        if source_account.owner != *owner_info.key {
+            return Err(TokenError::InvalidOwner.into());
+        }
+        
+        // Validate owner is a signer
+        if !owner_info.is_signer {
+            return Err(TokenError::InvalidOwner.into());
+        }
+        
+        // Set delegate and delegated amount
+        source_account.delegate = COption::Some(*delegate_info.key);
+        source_account.delegated_amount = amount;
+        
+        // Log debug information
+        msg!("=== Approve Debug Info ===");
+        msg!("[source_account_info] Account Information:");
+        msg!("  - key: {}", source_account_info.key);
+        msg!("  - owner: {}", source_account.owner);
+        msg!("  - mint: {}", source_account.mint);
+        msg!("  - amount: {}", source_account.amount);
+        
+        msg!("[delegate_info] Delegate:");
+        msg!("  - key: {} (will be approved)", delegate_info.key);
+        
+        msg!("[owner_info] Account Owner:");
+        msg!("  - key: {} (must be account owner)", owner_info.key);
+        msg!("  - is_signer: {}", owner_info.is_signer);
+        
+        msg!("[approval] Approval Details:");
+        msg!("  - delegate: {}", delegate_info.key);
+        msg!("  - delegated_amount: {} (approved amount)", amount);
+        
+        // Pack and save account data
+        Account::pack(source_account, &mut source_account_info.data.borrow_mut())?;
+        
+        msg!("✅ Approve completed successfully");
+        msg!("========================================");
         
         Ok(())
     }
@@ -624,6 +754,9 @@ impl Processor {
             }
             TokenInstruction::SyncNative => {
                 Self::process_sync_native(program_id, accounts)
+            }
+            TokenInstruction::Approve { amount } => {
+                Self::process_approve(program_id, accounts, amount)
             }
         }
     }

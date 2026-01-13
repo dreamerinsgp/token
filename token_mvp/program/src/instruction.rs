@@ -37,6 +37,11 @@ pub enum TokenInstruction {
     },
     /// Sync native account balance
     SyncNative,
+    /// Approve a delegate to transfer tokens
+    Approve {
+        /// Amount of tokens the delegate is approved for
+        amount: u64,
+    },
 }
 
 
@@ -57,6 +62,15 @@ impl TokenInstruction {
                 }
             }
             1 => Self::InitializeAccount,
+            2 => {
+                // Approve instruction
+                let amount = rest
+                    .get(..8)
+                    .and_then(|slice| slice.try_into().ok())
+                    .map(u64::from_le_bytes)
+                    .ok_or(TokenError::InvalidInstruction)?;
+                Self::Approve { amount }
+            }
             3 => {
                 // Transfer instruction
                 let amount = rest
