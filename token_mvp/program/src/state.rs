@@ -52,11 +52,6 @@ impl Sealed for Mint {}
 impl Pack for Mint {
     const LEN: usize = 82;
     
-    /// Unpacks a Mint from a byte slice without checking initialization state
-    pub fn unpack_unchecked(src: &[u8]) -> Result<Self, ProgramError> {
-        Self::unpack_from_slice(src)
-    }
-    
     fn pack_into_slice(&self, dst: &mut [u8]) {
         let dst = array_mut_ref![dst, 0, 82];
         let (
@@ -103,6 +98,13 @@ impl Pack for Mint {
             is_initialized,
             freeze_authority,
         })
+    }
+}
+
+impl Mint {
+    /// Unpacks a Mint from a byte slice without checking initialization state
+    pub fn unpack_unchecked(src: &[u8]) -> Result<Self, ProgramError> {
+        <Self as Pack>::unpack_from_slice(src)
     }
 }
 

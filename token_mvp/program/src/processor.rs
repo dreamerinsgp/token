@@ -6,12 +6,13 @@ use {
         state::Mint,
     },
     solana_account_info::{next_account_info, AccountInfo},
+    solana_msg::msg,
     solana_program_error::ProgramResult,
     solana_program_option::COption,
     solana_program_pack::Pack,
     solana_pubkey::Pubkey,
     solana_rent::Rent,
-    solana_sysvar::Sysvar,
+    solana_sysvar::SysvarSerialize,
 };
 
 /// Program state handler.
@@ -62,8 +63,36 @@ impl Processor {
         mint.is_initialized = true;
         mint.freeze_authority = freeze_authority;
         
+        // ========== 日志：显示 mint_info 和 mint 的详细信息 ==========
+        msg!("=== InitializeMint Debug Info ===");
+        msg!("[mint_info] Account Information:");
+        msg!("  - key: {}", mint_info.key);
+        msg!("  - lamports: {} (rent-exempt balance)", mint_info.lamports());
+        msg!("  - data_len(): {} bytes (expected: {} bytes)", mint_info.data_len(), Mint::LEN);
+        msg!("  - owner: {} (must be token program)", mint_info.owner);
+        msg!("  - executable: {}", mint_info.executable);
+        msg!("  - is_signer: {}", mint_info.is_signer);
+        msg!("  - is_writable: {} (must be true)", mint_info.is_writable);
+        
+        msg!("[mint] Struct Contents (before packing):");
+        match mint.mint_authority {
+            COption::Some(auth) => msg!("  - mint_authority: Some({})", auth),
+            COption::None => msg!("  - mint_authority: None"),
+        }
+        msg!("  - supply: {} (always starts at 0)", mint.supply);
+        msg!("  - decimals: {} (decimal places)", mint.decimals);
+        msg!("  - is_initialized: {} (will be set to true)", mint.is_initialized);
+        match mint.freeze_authority {
+            COption::Some(auth) => msg!("  - freeze_authority: Some({})", auth),
+            COption::None => msg!("  - freeze_authority: None (no freeze capability)"),
+        }
+        
         // Pack and save mint data
         Mint::pack(mint, &mut mint_info.data.borrow_mut())?;
+        
+        msg!("[After Pack] mint_info.data now contains serialized Mint struct (82 bytes)");
+        msg!("✅ InitializeMint completed successfully");
+        msg!("========================================");
         
         Ok(())
     }

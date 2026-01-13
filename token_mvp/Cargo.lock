@@ -2262,6 +2262,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "solana-program-option"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e7b4ddb464f274deb4a497712664c3b612e3f5f82471d4e47710fc4ab1c3095"
+
+[[package]]
 name = "solana-program-pack"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2698,6 +2704,7 @@ name = "spl-token"
 version = "0.1.0"
 dependencies = [
  "arrayref",
+ "bincode",
  "mollusk-svm",
  "solana-account",
  "solana-account-info",
@@ -2707,6 +2714,7 @@ dependencies = [
  "solana-program-entrypoint",
  "solana-program-error",
  "solana-program-memory",
+ "solana-program-option",
  "solana-program-pack",
  "solana-pubkey 3.0.0",
  "solana-rent",
