@@ -400,6 +400,108 @@ impl Processor {
         Ok(())
     }
 
+    /// Processes a Burn instruction
+    pub fn process_burn(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        amount: u64,
+    ) -> ProgramResult {
+        let _program_id = program_id; // Suppress unused warning for now
+        let account_info_iter = &mut accounts.iter();
+        
+        // Extract accounts in order:
+        // 0. [writable] The account to burn from
+        // 1. [writable] The token mint
+        // 2. [signer] The account's owner/delegate
+        let account_info = next_account_info(account_info_iter)?;
+        let mint_info = next_account_info(account_info_iter)?;
+        let authority_info = next_account_info(account_info_iter)?;
+        
+        // Validate accounts are owned by this program
+        check_program_account(account_info)?;
+        check_program_account(mint_info)?;
+        
+        // Validate accounts are writable
+        if !account_info.is_writable {
+            return Err(TokenError::InvalidOwner.into());
+        }
+        if !mint_info.is_writable {
+            return Err(TokenError::InvalidOwner.into());
+        }
+        
+        // Unpack account
+        let mut account = Account::unpack(&account_info.data.borrow())?;
+        
+        // Validate account is initialized
+        if !account.is_initialized {
+            return Err(TokenError::NotInitialized.into());
+        }
+        
+        // Unpack mint account
+        let mut mint = Mint::unpack(&mint_info.data.borrow())?;
+        
+        // Validate mint is initialized
+        if !mint.is_initialized {
+            return Err(TokenError::InvalidMint.into());
+        }
+        
+        // Validate mint match
+        if account.mint != *mint_info.key {
+            return Err(TokenError::MintMismatch.into());
+        }
+        
+        // Validate authority is the owner (for now, we don't support delegate)
+        if account.owner != *authority_info.key {
+            return Err(TokenError::InvalidOwner.into());
+        }
+        
+        // Validate authority is a signer
+        if !authority_info.is_signer {
+            return Err(TokenError::InvalidOwner.into());
+        }
+        
+        // Validate sufficient balance
+        if account.amount < amount {
+            return Err(TokenError::InsufficientFunds.into());
+        }
+        
+        // Perform burn: decrease supply and balance
+        account.amount = account.amount
+            .checked_sub(amount)
+            .ok_or(TokenError::Overflow)?;
+        
+        mint.supply = mint.supply
+            .checked_sub(amount)
+            .ok_or(TokenError::Overflow)?;
+        
+        // Log debug information
+        msg!("=== Burn Debug Info ===");
+        msg!("[account_info] Account to Burn From:");
+        msg!("  - key: {}", account_info.key);
+        msg!("  - owner: {}", account.owner);
+        msg!("  - mint: {}", account.mint);
+        msg!("  - amount before: {} (will subtract {})", account.amount + amount, amount);
+        msg!("  - amount after: {}", account.amount);
+        
+        msg!("[mint_info] Mint Account:");
+        msg!("  - key: {}", mint_info.key);
+        msg!("  - supply before: {} (will subtract {})", mint.supply + amount, amount);
+        msg!("  - supply after: {}", mint.supply);
+        
+        msg!("[authority_info] Account Owner:");
+        msg!("  - key: {} (must be account owner)", authority_info.key);
+        msg!("  - is_signer: {}", authority_info.is_signer);
+        
+        // Pack and save account data
+        Account::pack(account, &mut account_info.data.borrow_mut())?;
+        Mint::pack(mint, &mut mint_info.data.borrow_mut())?;
+        
+        msg!("✅ Burn completed successfully");
+        msg!("========================================");
+        
+        Ok(())
+    }
+
     /// Main instruction processing router
     pub fn process(
         program_id: &Pubkey,
@@ -431,9 +533,8 @@ impl Processor {
             TokenInstruction::MintTo { amount } => {
                 Self::process_mint_to(program_id, accounts, amount)
             }
-            TokenInstruction::Burn { .. } => {
-                // TODO: Implement Burn handler
-                Err(TokenError::NotInitialized.into())
+            TokenInstruction::Burn { amount } => {
+                Self::process_burn(program_id, accounts, amount)
             }
         }
     }
