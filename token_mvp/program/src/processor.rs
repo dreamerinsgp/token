@@ -8,13 +8,14 @@ use {
     },
     solana_account_info::{next_account_info, AccountInfo},
     solana_msg::msg,
-    solana_program_error::ProgramResult,
+    solana_program_error::{ProgramError, ProgramResult},
     solana_program_option::COption,
     solana_program_pack::Pack,
     solana_pubkey::Pubkey,
     solana_rent::Rent,
     solana_sysvar::SysvarSerialize,
 };
+use std::str::FromStr;
 
 /// Program state handler.
 pub struct Processor {}
@@ -157,6 +158,7 @@ impl Processor {
         account.is_initialized = true;
         account.delegate = COption::None;
         account.delegated_amount = 0;
+        account.is_frozen = false;
         
         // For native accounts, set is_native and calculate initial balance
         if is_native_mint {
@@ -240,12 +242,22 @@ impl Processor {
             return Err(TokenError::NotInitialized.into());
         }
         
+        // Check if source account is frozen
+        if source_account.is_frozen {
+            return Err(TokenError::AccountFrozen.into());
+        }
+        
         // Unpack destination account
         let mut destination_account = Account::unpack(&destination_info.data.borrow())?;
         
         // Validate destination account is initialized
         if !destination_account.is_initialized {
             return Err(TokenError::NotInitialized.into());
+        }
+        
+        // Check if destination account is frozen
+        if destination_account.is_frozen {
+            return Err(TokenError::AccountFrozen.into());
         }
         
         // Validate mint match
@@ -498,6 +510,11 @@ impl Processor {
             return Err(TokenError::NotInitialized.into());
         }
         
+        // Check if account is frozen
+        if account.is_frozen {
+            return Err(TokenError::AccountFrozen.into());
+        }
+        
         // Unpack mint account
         let mut mint = Mint::unpack(&mint_info.data.borrow())?;
         
@@ -676,6 +693,11 @@ impl Processor {
             return Err(TokenError::NotInitialized.into());
         }
         
+        // Check if account is frozen
+        if source_account.is_frozen {
+            return Err(TokenError::AccountFrozen.into());
+        }
+        
         // Validate owner is the account owner
         if source_account.owner != *owner_info.key {
             return Err(TokenError::InvalidOwner.into());
@@ -713,6 +735,223 @@ impl Processor {
         Account::pack(source_account, &mut source_account_info.data.borrow_mut())?;
         
         msg!("✅ Approve completed successfully");
+        msg!("========================================");
+        
+        Ok(())
+    }
+
+    /// Processes a CloseAccount instruction
+    /// 
+    /// CloseAccount closes a token account by transferring all remaining SOL (lamports)
+    /// to a destination account. This allows users to reclaim rent-exempt SOL that was
+    /// locked in the account.
+    /// 
+    /// For non-native accounts, the account must have zero token balance.
+    /// For native accounts, the remaining SOL (after rent-exempt reserve) can be transferred.
+    /// 
+    /// Accounts:
+    /// - [writable] The account to close
+    /// - [writable] The destination account to receive remaining SOL
+    /// - [signer] The account's owner (or close authority if set)
+    pub fn process_close_account(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+    ) -> ProgramResult {
+        let account_info_iter = &mut accounts.iter();
+        
+        // Extract accounts in order:
+        // 0. [writable] The account to close
+        // 1. [writable] The destination account to receive remaining SOL
+        // 2. [signer] The account's owner
+        let source_account_info = next_account_info(account_info_iter)?;
+        let destination_account_info = next_account_info(account_info_iter)?;
+        let authority_info = next_account_info(account_info_iter)?;
+        
+        // Validate source and destination are different accounts
+        if source_account_info.key == destination_account_info.key {
+            return Err(solana_program_error::ProgramError::InvalidAccountData);
+        }
+        
+        // Validate account is owned by this program
+        check_program_account(source_account_info)?;
+        
+        // Unpack source account
+        let source_account = Account::unpack(&source_account_info.data.borrow())?;
+        
+        // Validate account is initialized
+        if !source_account.is_initialized {
+            return Err(TokenError::NotInitialized.into());
+        }
+        
+        // For non-native accounts, balance must be zero
+        // For native accounts, we can close even with balance (the SOL will be transferred)
+        let is_native = source_account.is_native.is_some();
+        if !is_native && source_account.amount != 0 {
+            return Err(TokenError::InvalidState.into());
+        }
+        
+        // Validate authority is the account owner
+        // Note: In full token program, there's a close_authority field,
+        // but in our MVP we only support owner closing
+        if source_account.owner != *authority_info.key {
+            return Err(TokenError::InvalidOwner.into());
+        }
+        
+        // Validate authority is a signer
+        if !authority_info.is_signer {
+            return Err(TokenError::InvalidOwner.into());
+        }
+        
+        // Transfer all lamports from source to destination
+        let source_lamports = source_account_info.lamports();
+        let destination_starting_lamports = destination_account_info.lamports();
+        
+        // Add source lamports to destination
+        **destination_account_info.lamports.borrow_mut() = destination_starting_lamports
+            .checked_add(source_lamports)
+            .ok_or(TokenError::Overflow)?;
+        
+        // Set source lamports to zero
+        **source_account_info.lamports.borrow_mut() = 0;
+        
+        // Delete the account by assigning it to system program and clearing data
+        // System program ID: 11111111111111111111111111111111
+        let system_program_id = Pubkey::from_str("11111111111111111111111111111111")
+            .map_err(|_| ProgramError::InvalidAccountData)?;
+        source_account_info.assign(&system_program_id);
+        
+        // Clear account data
+        let mut account_data = source_account_info.data.borrow_mut();
+        account_data.fill(0);
+        drop(account_data);
+        
+        // Log debug information
+        msg!("=== CloseAccount Debug Info ===");
+        msg!("[source_account_info] Account to Close:");
+        msg!("  - key: {}", source_account_info.key);
+        msg!("  - owner: {}", source_account.owner);
+        msg!("  - mint: {}", source_account.mint);
+        msg!("  - amount: {} (token balance)", source_account.amount);
+        msg!("  - lamports: {} (will be transferred)", source_lamports);
+        msg!("  - is_native: {}", is_native);
+        
+        msg!("[destination_account_info] Destination:");
+        msg!("  - key: {} (will receive lamports)", destination_account_info.key);
+        msg!("  - lamports before: {}", destination_starting_lamports);
+        msg!("  - lamports after: {} (received {})", 
+             destination_starting_lamports + source_lamports, source_lamports);
+        
+        msg!("[authority_info] Account Owner:");
+        msg!("  - key: {} (must be account owner)", authority_info.key);
+        msg!("  - is_signer: {}", authority_info.is_signer);
+        
+        msg!("✅ CloseAccount completed successfully");
+        msg!("========================================");
+        
+        Ok(())
+    }
+
+    /// Processes a FreezeAccount instruction
+    /// 
+    /// FreezeAccount freezes an account, preventing transfers, approvals, and burns.
+    /// Only the mint's freeze authority can freeze accounts.
+    /// 
+    /// Accounts:
+    /// - [writable] The account to freeze
+    /// - [] The token mint
+    /// - [signer] The mint's freeze authority
+    pub fn process_freeze_account(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+    ) -> ProgramResult {
+        let account_info_iter = &mut accounts.iter();
+        
+        // Extract accounts in order:
+        // 0. [writable] The account to freeze
+        // 1. [] The token mint
+        // 2. [signer] The mint's freeze authority
+        let account_info = next_account_info(account_info_iter)?;
+        let mint_info = next_account_info(account_info_iter)?;
+        let authority_info = next_account_info(account_info_iter)?;
+        
+        // Validate account is owned by this program
+        check_program_account(account_info)?;
+        
+        // Validate account is writable
+        if !account_info.is_writable {
+            return Err(TokenError::InvalidOwner.into());
+        }
+        
+        // Unpack account
+        let mut account = Account::unpack(&account_info.data.borrow())?;
+        
+        // Validate account is initialized
+        if !account.is_initialized {
+            return Err(TokenError::NotInitialized.into());
+        }
+        
+        // Check if account is already frozen
+        if account.is_frozen {
+            return Err(TokenError::InvalidState.into());
+        }
+        
+        // Cannot freeze native accounts
+        if account.is_native.is_some() {
+            return Err(TokenError::NonNativeNotSupported.into());
+        }
+        
+        // Validate mint matches
+        if account.mint != *mint_info.key {
+            return Err(TokenError::MintMismatch.into());
+        }
+        
+        // Unpack mint to check freeze authority
+        let mint = Mint::unpack(&mint_info.data.borrow())?;
+        
+        // Validate mint has freeze authority
+        match mint.freeze_authority {
+            COption::Some(freeze_authority) => {
+                // Validate authority is the freeze authority
+                if freeze_authority != *authority_info.key {
+                    return Err(TokenError::InvalidOwner.into());
+                }
+                
+                // Validate authority is a signer
+                if !authority_info.is_signer {
+                    return Err(TokenError::InvalidOwner.into());
+                }
+            }
+            COption::None => {
+                // Mint doesn't have freeze authority, cannot freeze accounts
+                return Err(TokenError::MintCannotFreeze.into());
+            }
+        }
+        
+        // Freeze the account
+        account.is_frozen = true;
+        
+        // Log debug information
+        msg!("=== FreezeAccount Debug Info ===");
+        msg!("[account_info] Account to Freeze:");
+        msg!("  - key: {}", account_info.key);
+        msg!("  - owner: {}", account.owner);
+        msg!("  - mint: {}", account.mint);
+        msg!("  - amount: {}", account.amount);
+        msg!("  - is_frozen before: false");
+        msg!("  - is_frozen after: true");
+        
+        msg!("[mint_info] Token Mint:");
+        msg!("  - key: {}", mint_info.key);
+        msg!("  - freeze_authority: {:?}", mint.freeze_authority);
+        
+        msg!("[authority_info] Freeze Authority:");
+        msg!("  - key: {} (must be freeze authority)", authority_info.key);
+        msg!("  - is_signer: {}", authority_info.is_signer);
+        
+        // Pack and save account data
+        Account::pack(account, &mut account_info.data.borrow_mut())?;
+        
+        msg!("✅ FreezeAccount completed successfully");
         msg!("========================================");
         
         Ok(())
@@ -757,6 +996,12 @@ impl Processor {
             }
             TokenInstruction::Approve { amount } => {
                 Self::process_approve(program_id, accounts, amount)
+            }
+            TokenInstruction::CloseAccount => {
+                Self::process_close_account(program_id, accounts)
+            }
+            TokenInstruction::FreezeAccount => {
+                Self::process_freeze_account(program_id, accounts)
             }
         }
     }

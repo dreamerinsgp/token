@@ -50,6 +50,14 @@ pub enum TokenError {
     /// Non-native account not supported for this operation
     #[error("Non-native account not supported")]
     NonNativeNotSupported,
+    
+    /// Account is frozen
+    #[error("Account is frozen")]
+    AccountFrozen,
+    
+    /// Mint cannot freeze accounts
+    #[error("Mint cannot freeze accounts")]
+    MintCannotFreeze,
 }
 
 impl From<TokenError> for ProgramError {

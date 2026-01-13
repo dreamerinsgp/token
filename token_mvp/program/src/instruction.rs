@@ -42,6 +42,10 @@ pub enum TokenInstruction {
         /// Amount of tokens the delegate is approved for
         amount: u64,
     },
+    /// Close an account and transfer remaining SOL to destination
+    CloseAccount,
+    /// Freeze an account using the mint's freeze authority
+    FreezeAccount,
 }
 
 
@@ -99,6 +103,8 @@ impl TokenInstruction {
                 Self::Burn { amount }
             }
             9 => Self::SyncNative,
+            10 => Self::CloseAccount,
+            11 => Self::FreezeAccount,
             _ => return Err(TokenError::InvalidInstruction.into()),
         })
     }

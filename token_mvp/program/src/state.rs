@@ -39,6 +39,8 @@ pub struct Account {
     pub delegate: COption<Pubkey>,
     /// The amount of tokens the delegate is approved for
     pub delegated_amount: u64,
+    /// Is `true` if this account is frozen
+    pub is_frozen: bool,
 }
 
 
@@ -173,11 +175,11 @@ fn unpack_coption_u64(src: &[u8; 36]) -> Result<COption<u64>, ProgramError> {
 
 impl Sealed for Account {}
 impl Pack for Account {
-    const LEN: usize = 181; // mint (32) + owner (32) + amount (8) + is_initialized (1) + is_native (36) + delegate (36) + delegated_amount (8)
+    const LEN: usize = 182; // mint (32) + owner (32) + amount (8) + is_initialized (1) + is_native (36) + delegate (36) + delegated_amount (8) + is_frozen (1)
     
     fn pack_into_slice(&self, dst: &mut [u8]) {
-        // Pack fields in order: mint (32) + owner (32) + amount (8) + is_initialized (1) + is_native (36) + delegate (36) + delegated_amount (8)
-        let dst = array_mut_ref![dst, 0, 181];
+        // Pack fields in order: mint (32) + owner (32) + amount (8) + is_initialized (1) + is_native (36) + delegate (36) + delegated_amount (8) + is_frozen (1)
+        let dst = array_mut_ref![dst, 0, 182];
         
         // Pack mint (bytes 0-31)
         dst[0..32].copy_from_slice(self.mint.as_ref());
@@ -201,13 +203,16 @@ impl Pack for Account {
         
         // Pack delegated_amount (bytes 145-152)
         dst[145..153].copy_from_slice(&self.delegated_amount.to_le_bytes());
+        
+        // Pack is_frozen (byte 153)
+        dst[153] = self.is_frozen as u8;
     }
     
     fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
         if src.len() != Self::LEN {
             return Err(ProgramError::InvalidAccountData);
         }
-        let src = array_ref![src, 0, 181];
+        let src = array_ref![src, 0, 182];
         
         // Unpack mint (bytes 0-31)
         let mint = Pubkey::new_from_array(*array_ref![src, 0, 32]);
@@ -236,6 +241,13 @@ impl Pack for Account {
         // Unpack delegated_amount (bytes 145-152)
         let delegated_amount = u64::from_le_bytes(*array_ref![src, 145, 8]);
         
+        // Unpack is_frozen (byte 153)
+        let is_frozen = match src[153] {
+            0 => false,
+            1 => true,
+            _ => return Err(ProgramError::InvalidAccountData),
+        };
+        
         Ok(Account {
             mint,
             owner,
@@ -244,6 +256,7 @@ impl Pack for Account {
             is_native,
             delegate,
             delegated_amount,
+            is_frozen,
         })
     }
 }
