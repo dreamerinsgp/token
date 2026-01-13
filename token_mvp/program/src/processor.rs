@@ -957,6 +957,112 @@ impl Processor {
         Ok(())
     }
 
+    /// Processes a ThawAccount instruction
+    /// 
+    /// ThawAccount thaws a frozen account, restoring the ability to transfer, approve, and burn.
+    /// Only the mint's freeze authority can thaw accounts.
+    /// 
+    /// Accounts:
+    /// - [writable] The account to thaw
+    /// - [] The token mint
+    /// - [signer] The mint's freeze authority
+    pub fn process_thaw_account(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+    ) -> ProgramResult {
+        let account_info_iter = &mut accounts.iter();
+        
+        // Extract accounts in order:
+        // 0. [writable] The account to thaw
+        // 1. [] The token mint
+        // 2. [signer] The mint's freeze authority
+        let account_info = next_account_info(account_info_iter)?;
+        let mint_info = next_account_info(account_info_iter)?;
+        let authority_info = next_account_info(account_info_iter)?;
+        
+        // Validate account is owned by this program
+        check_program_account(account_info)?;
+        
+        // Validate account is writable
+        if !account_info.is_writable {
+            return Err(TokenError::InvalidOwner.into());
+        }
+        
+        // Unpack account
+        let mut account = Account::unpack(&account_info.data.borrow())?;
+        
+        // Validate account is initialized
+        if !account.is_initialized {
+            return Err(TokenError::NotInitialized.into());
+        }
+        
+        // Check if account is already thawed (not frozen)
+        if !account.is_frozen {
+            return Err(TokenError::InvalidState.into());
+        }
+        
+        // Cannot thaw native accounts (they can't be frozen in the first place)
+        if account.is_native.is_some() {
+            return Err(TokenError::NonNativeNotSupported.into());
+        }
+        
+        // Validate mint matches
+        if account.mint != *mint_info.key {
+            return Err(TokenError::MintMismatch.into());
+        }
+        
+        // Unpack mint to check freeze authority
+        let mint = Mint::unpack(&mint_info.data.borrow())?;
+        
+        // Validate mint has freeze authority
+        match mint.freeze_authority {
+            COption::Some(freeze_authority) => {
+                // Validate authority is the freeze authority
+                if freeze_authority != *authority_info.key {
+                    return Err(TokenError::InvalidOwner.into());
+                }
+                
+                // Validate authority is a signer
+                if !authority_info.is_signer {
+                    return Err(TokenError::InvalidOwner.into());
+                }
+            }
+            COption::None => {
+                // Mint doesn't have freeze authority, cannot thaw accounts
+                return Err(TokenError::MintCannotFreeze.into());
+            }
+        }
+        
+        // Thaw the account
+        account.is_frozen = false;
+        
+        // Log debug information
+        msg!("=== ThawAccount Debug Info ===");
+        msg!("[account_info] Account to Thaw:");
+        msg!("  - key: {}", account_info.key);
+        msg!("  - owner: {}", account.owner);
+        msg!("  - mint: {}", account.mint);
+        msg!("  - amount: {}", account.amount);
+        msg!("  - is_frozen before: true");
+        msg!("  - is_frozen after: false");
+        
+        msg!("[mint_info] Token Mint:");
+        msg!("  - key: {}", mint_info.key);
+        msg!("  - freeze_authority: {:?}", mint.freeze_authority);
+        
+        msg!("[authority_info] Freeze Authority:");
+        msg!("  - key: {} (must be freeze authority)", authority_info.key);
+        msg!("  - is_signer: {}", authority_info.is_signer);
+        
+        // Pack and save account data
+        Account::pack(account, &mut account_info.data.borrow_mut())?;
+        
+        msg!("✅ ThawAccount completed successfully");
+        msg!("========================================");
+        
+        Ok(())
+    }
+
     /// Main instruction processing router
     pub fn process(
         program_id: &Pubkey,
@@ -1002,6 +1108,9 @@ impl Processor {
             }
             TokenInstruction::FreezeAccount => {
                 Self::process_freeze_account(program_id, accounts)
+            }
+            TokenInstruction::ThawAccount => {
+                Self::process_thaw_account(program_id, accounts)
             }
         }
     }

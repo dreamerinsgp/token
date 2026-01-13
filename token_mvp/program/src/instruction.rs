@@ -46,6 +46,8 @@ pub enum TokenInstruction {
     CloseAccount,
     /// Freeze an account using the mint's freeze authority
     FreezeAccount,
+    /// Thaw a frozen account using the mint's freeze authority
+    ThawAccount,
 }
 
 
@@ -105,6 +107,7 @@ impl TokenInstruction {
             9 => Self::SyncNative,
             10 => Self::CloseAccount,
             11 => Self::FreezeAccount,
+            12 => Self::ThawAccount,
             _ => return Err(TokenError::InvalidInstruction.into()),
         })
     }

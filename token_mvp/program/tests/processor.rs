@@ -2253,3 +2253,441 @@ fn test_transfer_frozen_account_should_fail() {
     
     println!("✅ 测试通过：冻结账户不能转账");
 }
+
+#[test]
+fn test_thaw_account() {
+    // ========== 测试解冻账户 ==========
+    
+    let program_id = id();
+    let mint_keypair = Pubkey::new_unique();
+    let mint_authority = Pubkey::new_unique();
+    let freeze_authority = Pubkey::new_unique();
+    let decimals = 6u8;
+    
+    let account_keypair = Pubkey::new_unique();
+    let account_owner = Pubkey::new_unique();
+    
+    let rent = Rent::default();
+    let mint_data_len = Mint::LEN;
+    let account_data_len = Account::LEN;
+    let mint_rent_exempt = rent.minimum_balance(mint_data_len);
+    let account_rent_exempt = rent.minimum_balance(account_data_len);
+    
+    // 创建并初始化 mint（带 freeze_authority）
+    let mut mint_data = vec![0u8; mint_data_len];
+    let mut mint_lamports = mint_rent_exempt;
+    
+    let mint_account_info = AccountInfo::new(
+        &mint_keypair,
+        false,
+        true,
+        &mut mint_lamports,
+        &mut mint_data,
+        &program_id,
+        false,
+    );
+    
+    let rent_sysvar_id = Pubkey::from_str("SysvarRent111111111111111111111111111111111").unwrap();
+    let rent_data = bincode::serialize(&rent).unwrap();
+    let mut rent_lamports = 0u64;
+    let mut rent_data_mut = rent_data.clone();
+    
+    let rent_sysvar_info = AccountInfo::new(
+        &rent_sysvar_id,
+        false,
+        false,
+        &mut rent_lamports,
+        &mut rent_data_mut,
+        &rent_sysvar_id,
+        false,
+    );
+    
+    Processor::process_initialize_mint(
+        &program_id,
+        &[mint_account_info.clone(), rent_sysvar_info.clone()],
+        decimals,
+        mint_authority,
+        COption::Some(freeze_authority),
+    ).unwrap();
+    
+    // 初始化账户
+    let mut account_data = vec![0u8; account_data_len];
+    let mut account_lamports = account_rent_exempt;
+    
+    let account_info = AccountInfo::new(
+        &account_keypair,
+        false,
+        true,
+        &mut account_lamports,
+        &mut account_data,
+        &program_id,
+        false,
+    );
+    
+    let mut account_owner_lamports = 0u64;
+    let mut account_owner_data = vec![];
+    let account_owner_account_id = Pubkey::default();
+    let account_owner_account_info = AccountInfo::new(
+        &account_owner,
+        false,
+        false,
+        &mut account_owner_lamports,
+        &mut account_owner_data,
+        &account_owner_account_id,
+        false,
+    );
+    
+    Processor::process_initialize_account(
+        &program_id,
+        &[
+            account_info.clone(),
+            mint_account_info.clone(),
+            account_owner_account_info,
+            rent_sysvar_info.clone(),
+        ],
+    ).unwrap();
+    
+    // 先冻结账户
+    let mut freeze_authority_lamports = 0u64;
+    let mut freeze_authority_data = vec![];
+    let freeze_authority_account_id = Pubkey::default();
+    let freeze_authority_account_info = AccountInfo::new(
+        &freeze_authority,
+        true,
+        false,
+        &mut freeze_authority_lamports,
+        &mut freeze_authority_data,
+        &freeze_authority_account_id,
+        false,
+    );
+    
+    let freeze_accounts = vec![
+        account_info.clone(),
+        mint_account_info.clone(),
+        freeze_authority_account_info,
+    ];
+    
+    Processor::process_freeze_account(&program_id, &freeze_accounts).unwrap();
+    
+    // 验证账户已被冻结
+    let account_frozen = Account::unpack(&account_info.data.borrow()).unwrap();
+    assert_eq!(account_frozen.is_frozen, true, "账户应该已被冻结");
+    
+    // 解冻账户
+    let mut thaw_authority_lamports = 0u64;
+    let mut thaw_authority_data = vec![];
+    let thaw_authority_account_id = Pubkey::default();
+    let thaw_authority_account_info = AccountInfo::new(
+        &freeze_authority,
+        true,
+        false,
+        &mut thaw_authority_lamports,
+        &mut thaw_authority_data,
+        &thaw_authority_account_id,
+        false,
+    );
+    
+    let thaw_accounts = vec![
+        account_info.clone(),
+        mint_account_info.clone(),
+        thaw_authority_account_info,
+    ];
+    
+    Processor::process_thaw_account(&program_id, &thaw_accounts).unwrap();
+    
+    // 验证账户已被解冻
+    let account_thawed = Account::unpack(&account_info.data.borrow()).unwrap();
+    assert_eq!(account_thawed.is_frozen, false, "账户应该已被解冻");
+    
+    println!("✅ 测试通过：ThawAccount 指令测试成功");
+}
+
+#[test]
+fn test_thaw_account_not_frozen_should_fail() {
+    // ========== 测试解冻未冻结的账户应该失败 ==========
+    
+    let program_id = id();
+    let mint_keypair = Pubkey::new_unique();
+    let mint_authority = Pubkey::new_unique();
+    let freeze_authority = Pubkey::new_unique();
+    let decimals = 6u8;
+    
+    let account_keypair = Pubkey::new_unique();
+    let account_owner = Pubkey::new_unique();
+    
+    let rent = Rent::default();
+    let mint_data_len = Mint::LEN;
+    let account_data_len = Account::LEN;
+    let mint_rent_exempt = rent.minimum_balance(mint_data_len);
+    let account_rent_exempt = rent.minimum_balance(account_data_len);
+    
+    // 创建并初始化 mint
+    let mut mint_data = vec![0u8; mint_data_len];
+    let mut mint_lamports = mint_rent_exempt;
+    
+    let mint_account_info = AccountInfo::new(
+        &mint_keypair,
+        false,
+        true,
+        &mut mint_lamports,
+        &mut mint_data,
+        &program_id,
+        false,
+    );
+    
+    let rent_sysvar_id = Pubkey::from_str("SysvarRent111111111111111111111111111111111").unwrap();
+    let rent_data = bincode::serialize(&rent).unwrap();
+    let mut rent_lamports = 0u64;
+    let mut rent_data_mut = rent_data.clone();
+    
+    let rent_sysvar_info = AccountInfo::new(
+        &rent_sysvar_id,
+        false,
+        false,
+        &mut rent_lamports,
+        &mut rent_data_mut,
+        &rent_sysvar_id,
+        false,
+    );
+    
+    Processor::process_initialize_mint(
+        &program_id,
+        &[mint_account_info.clone(), rent_sysvar_info.clone()],
+        decimals,
+        mint_authority,
+        COption::Some(freeze_authority),
+    ).unwrap();
+    
+    // 初始化账户（未冻结）
+    let mut account_data = vec![0u8; account_data_len];
+    let mut account_lamports = account_rent_exempt;
+    
+    let account_info = AccountInfo::new(
+        &account_keypair,
+        false,
+        true,
+        &mut account_lamports,
+        &mut account_data,
+        &program_id,
+        false,
+    );
+    
+    let mut account_owner_lamports = 0u64;
+    let mut account_owner_data = vec![];
+    let account_owner_account_id = Pubkey::default();
+    let account_owner_account_info = AccountInfo::new(
+        &account_owner,
+        false,
+        false,
+        &mut account_owner_lamports,
+        &mut account_owner_data,
+        &account_owner_account_id,
+        false,
+    );
+    
+    Processor::process_initialize_account(
+        &program_id,
+        &[
+            account_info.clone(),
+            mint_account_info.clone(),
+            account_owner_account_info,
+            rent_sysvar_info.clone(),
+        ],
+    ).unwrap();
+    
+    // 尝试解冻未冻结的账户（应该失败）
+    let mut thaw_authority_lamports = 0u64;
+    let mut thaw_authority_data = vec![];
+    let thaw_authority_account_id = Pubkey::default();
+    let thaw_authority_account_info = AccountInfo::new(
+        &freeze_authority,
+        true,
+        false,
+        &mut thaw_authority_lamports,
+        &mut thaw_authority_data,
+        &thaw_authority_account_id,
+        false,
+    );
+    
+    let thaw_accounts = vec![
+        account_info.clone(),
+        mint_account_info.clone(),
+        thaw_authority_account_info,
+    ];
+    
+    let result = Processor::process_thaw_account(&program_id, &thaw_accounts);
+    assert!(
+        result.is_err(),
+        "解冻未冻结的账户应该失败"
+    );
+    
+    println!("✅ 测试通过：解冻未冻结的账户应该失败");
+}
+
+#[test]
+fn test_freeze_thaw_cycle() {
+    // ========== 测试冻结-解冻循环 ==========
+    
+    let program_id = id();
+    let mint_keypair = Pubkey::new_unique();
+    let mint_authority = Pubkey::new_unique();
+    let freeze_authority = Pubkey::new_unique();
+    let decimals = 6u8;
+    
+    let account_keypair = Pubkey::new_unique();
+    let account_owner = Pubkey::new_unique();
+    
+    let rent = Rent::default();
+    let mint_data_len = Mint::LEN;
+    let account_data_len = Account::LEN;
+    let mint_rent_exempt = rent.minimum_balance(mint_data_len);
+    let account_rent_exempt = rent.minimum_balance(account_data_len);
+    
+    // 创建并初始化 mint
+    let mut mint_data = vec![0u8; mint_data_len];
+    let mut mint_lamports = mint_rent_exempt;
+    
+    let mint_account_info = AccountInfo::new(
+        &mint_keypair,
+        false,
+        true,
+        &mut mint_lamports,
+        &mut mint_data,
+        &program_id,
+        false,
+    );
+    
+    let rent_sysvar_id = Pubkey::from_str("SysvarRent111111111111111111111111111111111").unwrap();
+    let rent_data = bincode::serialize(&rent).unwrap();
+    let mut rent_lamports = 0u64;
+    let mut rent_data_mut = rent_data.clone();
+    
+    let rent_sysvar_info = AccountInfo::new(
+        &rent_sysvar_id,
+        false,
+        false,
+        &mut rent_lamports,
+        &mut rent_data_mut,
+        &rent_sysvar_id,
+        false,
+    );
+    
+    Processor::process_initialize_mint(
+        &program_id,
+        &[mint_account_info.clone(), rent_sysvar_info.clone()],
+        decimals,
+        mint_authority,
+        COption::Some(freeze_authority),
+    ).unwrap();
+    
+    // 初始化账户
+    let mut account_data = vec![0u8; account_data_len];
+    let mut account_lamports = account_rent_exempt;
+    
+    let account_info = AccountInfo::new(
+        &account_keypair,
+        false,
+        true,
+        &mut account_lamports,
+        &mut account_data,
+        &program_id,
+        false,
+    );
+    
+    let mut account_owner_lamports = 0u64;
+    let mut account_owner_data = vec![];
+    let account_owner_account_id = Pubkey::default();
+    let account_owner_account_info = AccountInfo::new(
+        &account_owner,
+        false,
+        false,
+        &mut account_owner_lamports,
+        &mut account_owner_data,
+        &account_owner_account_id,
+        false,
+    );
+    
+    Processor::process_initialize_account(
+        &program_id,
+        &[
+            account_info.clone(),
+            mint_account_info.clone(),
+            account_owner_account_info,
+            rent_sysvar_info.clone(),
+        ],
+    ).unwrap();
+    
+    // 创建 freeze authority 账户
+    let mut freeze_authority_lamports = 0u64;
+    let mut freeze_authority_data = vec![];
+    let freeze_authority_account_id = Pubkey::default();
+    
+    // 冻结
+    let freeze_authority_account_info = AccountInfo::new(
+        &freeze_authority,
+        true,
+        false,
+        &mut freeze_authority_lamports,
+        &mut freeze_authority_data,
+        &freeze_authority_account_id,
+        false,
+    );
+    
+    let freeze_accounts = vec![
+        account_info.clone(),
+        mint_account_info.clone(),
+        freeze_authority_account_info,
+    ];
+    
+    Processor::process_freeze_account(&program_id, &freeze_accounts).unwrap();
+    let account1 = Account::unpack(&account_info.data.borrow()).unwrap();
+    assert_eq!(account1.is_frozen, true);
+    
+    // 解冻
+    let mut thaw_authority_lamports = 0u64;
+    let mut thaw_authority_data = vec![];
+    let thaw_authority_account_info = AccountInfo::new(
+        &freeze_authority,
+        true,
+        false,
+        &mut thaw_authority_lamports,
+        &mut thaw_authority_data,
+        &freeze_authority_account_id,
+        false,
+    );
+    
+    let thaw_accounts = vec![
+        account_info.clone(),
+        mint_account_info.clone(),
+        thaw_authority_account_info,
+    ];
+    
+    Processor::process_thaw_account(&program_id, &thaw_accounts).unwrap();
+    let account2 = Account::unpack(&account_info.data.borrow()).unwrap();
+    assert_eq!(account2.is_frozen, false);
+    
+    // 再次冻结
+    let mut freeze_authority_lamports2 = 0u64;
+    let mut freeze_authority_data2 = vec![];
+    let freeze_authority_account_info2 = AccountInfo::new(
+        &freeze_authority,
+        true,
+        false,
+        &mut freeze_authority_lamports2,
+        &mut freeze_authority_data2,
+        &freeze_authority_account_id,
+        false,
+    );
+    
+    let freeze_accounts2 = vec![
+        account_info.clone(),
+        mint_account_info.clone(),
+        freeze_authority_account_info2,
+    ];
+    
+    Processor::process_freeze_account(&program_id, &freeze_accounts2).unwrap();
+    let account3 = Account::unpack(&account_info.data.borrow()).unwrap();
+    assert_eq!(account3.is_frozen, true);
+    
+    println!("✅ 测试通过：冻结-解冻循环测试成功");
+}
